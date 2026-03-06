@@ -54,6 +54,7 @@ class CODIRuntime(nn.Module):
             torch_dtype = torch.bfloat16 if runtime_config.bf16 else torch.float16
         else:
             torch_dtype = torch.float32
+        self.runtime_dtype = torch_dtype
 
         quantization_config = None
         if model_config.load_in_4bit and torch.cuda.is_available():
@@ -100,7 +101,7 @@ class CODIRuntime(nn.Module):
             ]
             if not runtime_config.prj_no_ln:
                 blocks.append(nn.LayerNorm(self.codi.config.hidden_size))
-            self.prj = nn.Sequential(*blocks)
+            self.prj = nn.Sequential(*blocks).to(dtype=self.runtime_dtype)
         else:
             self.prj = nn.Identity()
 
