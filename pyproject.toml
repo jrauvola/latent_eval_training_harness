@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codi-reimplementation"
+version = "0.1.0"
+description = "Eval-first CODI reimplementation for latent reasoning experiments."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Josh Rauvola" }
+]
+dependencies = [
+  "accelerate>=1.2.0",
+  "datasets>=3.0.0",
+  "huggingface-hub>=0.28.0",
+  "numpy>=1.26.0",
+  "peft>=0.13.0",
+  "PyYAML>=6.0.2",
+  "safetensors>=0.4.5",
+  "torch>=2.4.0",
+  "transformers>=4.48.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.8.0",
+]
+
+[project.scripts]
+codi-eval = "codi_reimplementation.cli:main"
+codi-train = "codi_reimplementation.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

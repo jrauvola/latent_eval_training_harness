@@ -1,0 +1,50 @@
+model:
+  base_model_name_or_path: gpt2
+  lora_r: 128
+  lora_alpha: 32
+  lora_dropout: 0.1
+  lora_init: true
+  use_lora: true
+  full_precision: true
+
+data:
+  dataset_names:
+    - gsm8k_aug
+  cache_dir: .cache/huggingface
+  max_samples:
+  include_last_cot: false
+  answer_only: false
+  max_token_num: 1000
+
+runtime:
+  model_max_length: 512
+  num_latent: 6
+  use_prj: true
+  prj_dim: 768
+  prj_dropout: 0.0
+  prj_no_ln: false
+  distill_loss_div_std: true
+  distill_loss_type: smooth_l1
+  distill_loss_factor: 20.0
+  ref_loss_factor: 1.0
+  remove_eos: true
+  bf16: true
+  seed: 11
+
+trainer:
+  output_dir: artifacts/train/gpt2
+  logging_dir: artifacts/train/gpt2/logs
+  logging_steps: 10
+  per_device_train_batch_size: 64
+  gradient_accumulation_steps: 2
+  num_train_epochs: 40
+  learning_rate: 0.003
+  max_grad_norm: 2.0
+  save_strategy: epoch
+  save_total_limit: 2
+  save_safetensors: true
+  weight_decay: 0.1
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  report_to: []
+  dataloader_num_workers: 2
