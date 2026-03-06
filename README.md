@@ -1,9 +1,9 @@
-# CODI Reimplementation
+# Latent Eval Training Harness
 
-This repository is a clean-room, evaluation-first reimplementation of CODI
-("Compressing Chain-of-Thought into Continuous Space via Self-Distillation").
-It is built from the public paper, docs, and reference repos as behavioral
-references only. No source files from the reference implementations are copied.
+This repository is a clean-room latent reasoning evaluation and training harness
+starting from a CODI-focused implementation path. It is built from the public
+paper, docs, and reference repos as behavioral references only. No source files
+from the reference implementations are copied.
 
 ## Scope
 
