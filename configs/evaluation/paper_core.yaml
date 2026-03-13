@@ -24,52 +24,60 @@ models:
     checkpoint_type: base_model
     model_kind: causal_lm
     inference_strategy: standard_generation
-    base_model_name_or_path: gpt2
-    model_max_length: 512
-    num_latent: 0
-    use_prj: false
-    use_lora: false
-    bf16: true
+    model:
+      base_model_name_or_path: gpt2
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: true
   - name: codi_gpt2_official
     checkpoint_source: zen-E/CODI-gpt2
     checkpoint_type: hf_repo
     model_kind: latent_runtime
     inference_strategy: latent_cot
-    base_model_name_or_path: gpt2
-    model_max_length: 512
-    num_latent: 6
-    use_prj: true
-    prj_dim: 768
-    prj_dropout: 0.0
-    remove_eos: true
-    lora_r: 128
-    lora_alpha: 32
-    use_lora: true
-    bf16: true
+    model:
+      base_model_name_or_path: gpt2
+      lora_r: 128
+      lora_alpha: 32
+      use_lora: true
+    runtime:
+      model_max_length: 512
+      num_latent: 6
+      use_prj: true
+      prj_dim: 768
+      prj_dropout: 0.0
+      remove_eos: true
+      bf16: true
   - name: base_llama32_1b_instruct
     checkpoint_source:
     checkpoint_type: base_model
     model_kind: causal_lm
     inference_strategy: standard_generation
-    base_model_name_or_path: meta-llama/Llama-3.2-1B-Instruct
-    model_max_length: 512
-    num_latent: 0
-    use_prj: false
-    use_lora: false
-    bf16: true
+    model:
+      base_model_name_or_path: meta-llama/Llama-3.2-1B-Instruct
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: true
   - name: codi_llama32_1b_official
     checkpoint_source: zen-E/CODI-llama3.2-1b-Instruct
     checkpoint_type: hf_repo
     model_kind: latent_runtime
     inference_strategy: latent_cot
-    base_model_name_or_path: meta-llama/Llama-3.2-1B-Instruct
-    model_max_length: 512
-    num_latent: 6
-    use_prj: true
-    prj_dim: 2048
-    prj_dropout: 0.0
-    remove_eos: true
-    lora_r: 128
-    lora_alpha: 32
-    use_lora: true
-    bf16: true
+    model:
+      base_model_name_or_path: meta-llama/Llama-3.2-1B-Instruct
+      lora_r: 128
+      lora_alpha: 32
+      use_lora: true
+    runtime:
+      model_max_length: 512
+      num_latent: 6
+      use_prj: true
+      prj_dim: 2048
+      prj_dropout: 0.0
+      remove_eos: true
+      bf16: true

@@ -1,0 +1,41 @@
+runtime:
+  output_dir: artifacts/eval/codi_gpt2_gsm8k_aug_paper_v1_broader_suite_gh200
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 32
+  max_examples_per_benchmark:
+  max_new_tokens: 128
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+benchmarks:
+  - gsm8k
+  - svamp
+  - gsm-hard
+  - multi-arith
+  - commonsense_qa
+  - strategyqa
+  - prontoqa
+
+models:
+  - name: codi_gpt2_gsm8k_aug_paper_v1
+    checkpoint_source: artifacts/train/codi_gpt2_gsm8k_aug_paper_v1
+    checkpoint_type: local_path
+    model_kind: latent_runtime
+    inference_strategy: latent_cot
+    model:
+      base_model_name_or_path: gpt2
+      lora_r: 128
+      lora_alpha: 32
+      use_lora: true
+    runtime:
+      model_max_length: 512
+      num_latent: 6
+      use_prj: true
+      prj_dim: 768
+      prj_dropout: 0.0
+      remove_eos: true
+      bf16: true

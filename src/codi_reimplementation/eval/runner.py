@@ -12,7 +12,7 @@ from codi_reimplementation.benchmarks import get_benchmark_spec, load_benchmark
 from codi_reimplementation.benchmarks.types import BenchmarkExample
 from codi_reimplementation.config import dump_yamlable, ensure_dir, load_yaml_config
 from codi_reimplementation.eval.metrics import score_prediction
-from codi_reimplementation.eval.reporting import write_csv, write_jsonl, write_markdown_summary
+from codi_reimplementation.eval.reporting import append_jsonl, write_csv, write_markdown_summary
 from codi_reimplementation.models import EvalModelSpec, load_eval_model
 
 
@@ -166,10 +166,14 @@ def run_evaluation_from_config(config_path: str) -> None:
     ensure_dir(config.runtime.snapshot_dir)
 
     summary_rows: list[dict[str, Any]] = []
-    prediction_rows: list[dict[str, Any]] = []
 
     run_metadata_path = output_dir / "resolved_config.json"
     run_metadata_path.write_text(json.dumps(dump_yamlable(payload), indent=2), encoding="utf-8")
+
+    predictions_path = output_dir / "predictions.jsonl"
+    # Start fresh so a re-run overwrites; incremental appends happen below
+    if predictions_path.exists():
+        predictions_path.unlink()
 
     for model_spec in config.models:
         model = load_eval_model(model_spec, device=device)
@@ -219,21 +223,21 @@ def run_evaluation_from_config(config_path: str) -> None:
                             "latency_s": per_example_latency,
                         }
                         scored_rows.append(row)
-                        prediction_rows.append(row | {"prompt": example.prompt})
 
                 accuracy = sum(1 for row in scored_rows if row["correct"]) / max(len(scored_rows), 1)
-                summary_rows.append(
-                    {
-                        "model": model_spec.name,
-                        "benchmark": benchmark_name,
-                        "mode": mode,
-                        "accuracy": accuracy,
-                        "num_examples": len(scored_rows),
-                        "avg_latency_s": sum(latencies) / max(len(latencies), 1),
-                        "avg_prediction_chars": sum(char_counts) / max(len(char_counts), 1),
-                    }
-                )
+                summary_row = {
+                    "model": model_spec.name,
+                    "benchmark": benchmark_name,
+                    "mode": mode,
+                    "accuracy": accuracy,
+                    "num_examples": len(scored_rows),
+                    "avg_latency_s": sum(latencies) / max(len(latencies), 1),
+                    "avg_prediction_chars": sum(char_counts) / max(len(char_counts), 1),
+                }
+                summary_rows.append(summary_row)
 
-    write_jsonl(output_dir / "predictions.jsonl", prediction_rows)
-    write_csv(output_dir / "summary.csv", summary_rows)
-    write_markdown_summary(output_dir / "summary.md", summary_rows)
+                # Checkpoint: write after each (model, benchmark, mode) so a crash loses at most one run
+                prediction_rows_for_mode = [row | {"prompt": example.prompt} for row, example in zip(scored_rows, loaded.examples[: len(scored_rows)])]
+                append_jsonl(predictions_path, prediction_rows_for_mode)
+                write_csv(output_dir / "summary.csv", summary_rows)
+                write_markdown_summary(output_dir / "summary.md", summary_rows)

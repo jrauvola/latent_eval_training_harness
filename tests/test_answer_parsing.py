@@ -1,4 +1,4 @@
-from codi_reimplementation.benchmarks.answer_parsing import parse_prediction
+from latent_harness.evaluation.benchmarks import parse_prediction
 
 
 def test_numeric_parser_uses_last_number() -> None:

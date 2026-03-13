@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from codi_reimplementation.config import ensure_dir
+from latent_harness.core.io import ensure_dir
 
 
 def write_jsonl(path: str | Path, rows: list[dict[str, Any]]) -> Path:
@@ -18,7 +18,6 @@ def write_jsonl(path: str | Path, rows: list[dict[str, Any]]) -> Path:
 
 
 def append_jsonl(path: str | Path, rows: list[dict[str, Any]]) -> Path:
-    """Append rows to a JSONL file (for incremental checkpointing)."""
     destination = Path(path).expanduser().resolve()
     ensure_dir(destination.parent)
     with destination.open("a", encoding="utf-8") as handle:
@@ -45,15 +44,15 @@ def write_markdown_summary(path: str | Path, rows: list[dict[str, Any]]) -> Path
     lines = [
         "# Evaluation Summary",
         "",
-        "| model | benchmark | mode | accuracy | examples | avg_latency_s | avg_chars |",
+        "| model | benchmark | inference_strategy | accuracy | examples | avg_latency_s | avg_chars |",
         "| --- | --- | --- | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         lines.append(
-            "| {model} | {benchmark} | {mode} | {accuracy:.4f} | {num_examples} | {avg_latency_s:.4f} | {avg_prediction_chars:.1f} |".format(
+            "| {model} | {benchmark} | {inference_strategy} | {accuracy:.4f} | {num_examples} | {avg_latency_s:.4f} | {avg_prediction_chars:.1f} |".format(
                 model=row["model"],
                 benchmark=row["benchmark"],
-                mode=row["mode"],
+                inference_strategy=row["inference_strategy"],
                 accuracy=row["accuracy"],
                 num_examples=row["num_examples"],
                 avg_latency_s=row["avg_latency_s"],

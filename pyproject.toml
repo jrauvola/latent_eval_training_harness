@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "latent-eval-training-harness"
-version = "0.1.0"
-description = "Eval-first CODI reimplementation for latent reasoning experiments."
+version = "0.2.0"
+description = "Split training and evaluation harness for latent reasoning experiments."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -15,6 +15,7 @@ authors = [
 dependencies = [
   "accelerate>=1.2.0",
   "datasets>=3.0.0",
+  "fastapi>=0.115.0",
   "huggingface-hub>=0.28.0",
   "numpy>=1.26.0",
   "peft>=0.13.0",
@@ -22,6 +23,7 @@ dependencies = [
   "safetensors>=0.4.5",
   "torch>=2.4.0",
   "transformers>=4.48.0",
+  "uvicorn>=0.34.0",
 ]
 
 [project.optional-dependencies]
@@ -31,8 +33,11 @@ dev = [
 ]
 
 [project.scripts]
-codi-eval = "codi_reimplementation.cli:main"
-codi-train = "codi_reimplementation.cli:main"
+latent-eval = "latent_harness.evaluation.cli:main"
+latent-train = "latent_harness.training.cli:main"
+codi-eval = "latent_harness.evaluation.cli:main"
+codi-train = "latent_harness.training.cli:main"
+latent-serve-openai = "latent_harness.serving.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
