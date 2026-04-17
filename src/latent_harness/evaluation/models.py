@@ -138,6 +138,7 @@ def _load_standard_generation_model(
             model_max_length=spec.runtime.model_max_length,
             padding_side="left",
             use_fast=False,
+            trust_remote_code=spec.trust_remote_code,
         )
         if tokenizer.pad_token_id is None:
             if tokenizer.eos_token is not None:
@@ -149,6 +150,7 @@ def _load_standard_generation_model(
             "token": resolve_hf_hub_token(spec.model.hf_token),
             "torch_dtype": torch_dtype if spec.model.full_precision else None,
             "low_cpu_mem_usage": True,
+            "trust_remote_code": spec.trust_remote_code,
         }
         if torch.cuda.is_available():
             load_kw["device_map"] = "auto"
