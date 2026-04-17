@@ -70,12 +70,14 @@ run_preflight_checks() {
     log "ok   preflight[1/6] disk: ${gb_free}GB free"
   fi
 
-  # Check 2: HF auth + tokenizer sanity for google/gemma-3-4b-it
+  # Check 2: HF auth + tokenizer sanity for google/gemma-3-4b-it.
+  # Force use_fast=False so the slow-tokenizer path runs -- catches missing
+  # sentencepiece deps that the fast path silently skips but training hits later.
   if "${HARNESS_DIR}/.venv/bin/python" -c "
 from transformers import AutoTokenizer
-AutoTokenizer.from_pretrained('google/gemma-3-4b-it')
+AutoTokenizer.from_pretrained('google/gemma-3-4b-it', use_fast=False)
 " > /tmp/preflight_hf.log 2>&1; then
-    log "ok   preflight[2/6] hf auth + tokenizer: gemma-3-4b-it reachable"
+    log "ok   preflight[2/6] hf auth + tokenizer: gemma-3-4b-it reachable (slow path)"
   else
     log "FAIL preflight[2/6] hf auth + tokenizer: see /tmp/preflight_hf.log"
     failures=$((failures + 1))
