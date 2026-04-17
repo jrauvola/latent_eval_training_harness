@@ -1,0 +1,37 @@
+runtime:
+  output_dir: artifacts/eval/ouro_1.4b_base_breadth
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 8
+  max_examples_per_benchmark: 100
+  max_new_tokens: 512
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+benchmarks:
+  - gsm8k
+  - commonsense_qa
+  - svamp
+  - gsm-hard
+  - strategyqa
+  - p3_arc_challenge_letter
+
+models:
+  - name: ouro_1.4b_base
+    checkpoint_source: ByteDance/Ouro-1.4B
+    checkpoint_type: hf_pretrained
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    trust_remote_code: true
+    disable_kv_cache: true
+    model:
+      base_model_name_or_path: ByteDance/Ouro-1.4B
+      use_lora: false
+    runtime:
+      model_max_length: 2048
+      num_latent: 0
+      use_prj: false
+      bf16: true
