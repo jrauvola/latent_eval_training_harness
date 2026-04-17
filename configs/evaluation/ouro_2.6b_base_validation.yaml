@@ -1,0 +1,32 @@
+runtime:
+  output_dir: artifacts/eval/ouro_2.6b_base_validation
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 4
+  max_examples_per_benchmark:
+  max_new_tokens: 256
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+benchmarks:
+  - gsm8k
+  - commonsense_qa
+
+models:
+  - name: ouro_2.6b_base
+    checkpoint_source: ByteDance/Ouro-2.6B
+    checkpoint_type: hf_pretrained
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    trust_remote_code: true
+    model:
+      base_model_name_or_path: ByteDance/Ouro-2.6B
+      use_lora: false
+    runtime:
+      model_max_length: 2048
+      num_latent: 0
+      use_prj: false
+      bf16: true
