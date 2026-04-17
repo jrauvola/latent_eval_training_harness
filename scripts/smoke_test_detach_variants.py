@@ -30,6 +30,7 @@ VARIANTS: list[tuple[str, str]] = [
 ]
 SMOKE_STEPS = 10
 SMOKE_SAMPLES = 64
+SMOKE_TIMEOUT_SEC = 1800  # 30 min per variant; well above expected 10-step wall time
 
 
 def _materialize_smoke_config(src_cfg: Path, variant: str) -> Path:
@@ -77,15 +78,26 @@ def _run_one(variant: str, cfg_filename: str) -> bool:
         "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"
     )
 
-    proc = subprocess.run(
-        [sys.executable, "-m", "latent_harness.training.cli", "--config", str(smoke_cfg)],
-        cwd=str(HARNESS_ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-
     log_path = smoke_cfg.with_suffix(".log")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "latent_harness.training.cli", "--config", str(smoke_cfg)],
+            cwd=str(HARNESS_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=SMOKE_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        log_path.write_text(
+            f"STDOUT\n------\n{stdout}\n\nSTDERR\n------\n{stderr}\n\n"
+            f"--- TIMEOUT after {SMOKE_TIMEOUT_SEC}s ---\n"
+        )
+        print(f"FAIL [{variant}]: timed out after {SMOKE_TIMEOUT_SEC}s — see {log_path}")
+        return False
+
     log_path.write_text(f"STDOUT\n------\n{proc.stdout}\n\nSTDERR\n------\n{proc.stderr}")
 
     if proc.returncode != 0:
@@ -109,6 +121,15 @@ def _run_one(variant: str, cfg_filename: str) -> bool:
 
 
 def main() -> int:
+    # Pre-flight: verify all variant configs exist before running any. Fails fast
+    # with a clear message rather than getting partway through a long suite.
+    missing = [cfg for _, cfg in VARIANTS if not (CONFIGS_DIR / cfg).is_file()]
+    if missing:
+        print(f"FAIL pre-flight: missing config files in {CONFIGS_DIR}:")
+        for cfg in missing:
+            print(f"  - {cfg}")
+        return 1
+
     results = {variant: _run_one(variant, cfg) for variant, cfg in VARIANTS}
     print()
     print("=== smoke summary ===")
