@@ -45,6 +45,15 @@ class LatentRuntimeConfig:
     detach_latent_between_steps: bool = False
     #: Detach the KV cache between non-final latent rollout steps (requires DynamicCache support).
     detach_cache_between_steps: bool = False
+    #: Number of latent steps at the END of the loop to keep gradient-connected.
+    #: None or 1 = current behavior (only the final latent step's gradient reaches the decoder).
+    #: K > 1 = keep last K latent-step boundaries connected (requires num_latent >= K).
+    detach_keep_last_k: int | None = None
+    #: Position-based detach mode for the KV cache.
+    #: "all" (default): detach all positions (current behavior).
+    #: "reasoning_only": detach only question-origin positions [0, encoder_length);
+    #: latent-origin positions keep grad_fn so gradient flows between latent steps.
+    detach_position_mode: str = "all"
     use_prj: bool = True
     prj_dim: int = 2048
     prj_dropout: float = 0.0
@@ -67,3 +76,21 @@ class LatentRuntimeConfig:
     use_chat_template: bool = False
     #: Extra kwargs for ``tokenizer.apply_chat_template`` (e.g. ``enable_thinking`` for Qwen3).
     chat_template_kwargs: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.detach_keep_last_k is not None:
+            if self.detach_keep_last_k < 1:
+                raise ValueError(
+                    f"detach_keep_last_k must be >= 1 (got {self.detach_keep_last_k}); "
+                    "use None for current behavior."
+                )
+            if self.detach_keep_last_k > self.num_latent:
+                raise ValueError(
+                    f"detach_keep_last_k ({self.detach_keep_last_k}) must not exceed "
+                    f"num_latent ({self.num_latent})."
+                )
+        if self.detach_position_mode not in {"all", "reasoning_only"}:
+            raise ValueError(
+                f"detach_position_mode must be 'all' or 'reasoning_only' "
+                f"(got {self.detach_position_mode!r})."
+            )
