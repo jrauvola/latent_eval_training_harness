@@ -119,30 +119,86 @@ def maybe_prepare_gemma4_peft(model_name: str) -> None:
         Gemma4ClippableLinear.out_features = property(lambda self: self.linear.out_features)
 
 
-def _detach_cache(past_key_values: Any) -> Any:
+def _detach_cache(
+    past_key_values: Any,
+    *,
+    detach_up_to_pos: int | None = None,
+) -> Any:
     """Detach KV cache tensors from the autograd graph.
 
     Handles both legacy tuple-of-tuples caches and the ``DynamicCache``
     objects used by modern transformers (5.x+).
+
+    Args:
+        past_key_values: KV cache to detach.
+        detach_up_to_pos: If ``None`` (default), detach all positions in
+            every tensor in every layer entry (legacy full-detach
+            behavior). If an integer, detach only positions
+            ``[0, detach_up_to_pos)`` along the sequence-length axis of
+            the K and V tensors; positions ``[detach_up_to_pos, end]``
+            retain their ``grad_fn`` so gradients continue to flow.
+            Non-K/V tensor elements in a layer entry are detached
+            wholesale in this mode.
     """
     if past_key_values is None:
         return None
+
+    def _detach_tensor_full(t: torch.Tensor) -> torch.Tensor:
+        return t.detach()
+
+    def _slice_detach(t: torch.Tensor, cutoff: int) -> torch.Tensor:
+        seq_len = t.size(-2)
+        cutoff = min(cutoff, seq_len)
+        if cutoff <= 0:
+            return t
+        if cutoff >= seq_len:
+            return t.detach()
+        return torch.cat([t[..., :cutoff, :].detach(), t[..., cutoff:, :]], dim=-2)
+
     try:
         from transformers.cache_utils import DynamicCache
     except ImportError:
         DynamicCache = None
+
     if DynamicCache is not None and isinstance(past_key_values, DynamicCache):
         new_cache = DynamicCache()
         for layer_idx, layer_data in enumerate(past_key_values):
-            k = layer_data[0]
-            v = layer_data[1]
-            new_cache.update(k.detach(), v.detach(), layer_idx)
+            k, v = layer_data[0], layer_data[1]
+            if detach_up_to_pos is None:
+                k_new, v_new = _detach_tensor_full(k), _detach_tensor_full(v)
+            else:
+                k_new = _slice_detach(k, detach_up_to_pos)
+                v_new = _slice_detach(v, detach_up_to_pos)
+            new_cache.update(k_new, v_new, layer_idx)
         return new_cache
+
     if isinstance(past_key_values, (tuple, list)):
-        return tuple(
-            tuple(t.detach() if isinstance(t, torch.Tensor) else t for t in layer_kv)
-            for layer_kv in past_key_values
-        )
+        out = []
+        for layer_kv in past_key_values:
+            if not isinstance(layer_kv, (tuple, list)):
+                out.append(layer_kv)
+                continue
+            if detach_up_to_pos is None:
+                out.append(
+                    tuple(
+                        _detach_tensor_full(t) if isinstance(t, torch.Tensor) else t
+                        for t in layer_kv
+                    )
+                )
+                continue
+            if len(layer_kv) < 2 or not isinstance(layer_kv[0], torch.Tensor):
+                out.append(tuple(layer_kv) if isinstance(layer_kv, list) else layer_kv)
+                continue
+            k, v = layer_kv[0], layer_kv[1]
+            k_new = _slice_detach(k, detach_up_to_pos)
+            v_new = _slice_detach(v, detach_up_to_pos)
+            rest = tuple(
+                _detach_tensor_full(t) if isinstance(t, torch.Tensor) else t
+                for t in layer_kv[2:]
+            )
+            out.append((k_new, v_new) + rest)
+        return tuple(out)
+
     return past_key_values
 
 
