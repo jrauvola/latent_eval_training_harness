@@ -8,6 +8,7 @@ from latent_harness.core.config import LatentRuntimeConfig
 from latent_harness.core.runtime import (
     _apply_boundary_detach,
     _detach_cache,
+    _resolve_runtime_dtype,
     _resolve_should_detach,
 )
 
@@ -37,6 +38,57 @@ class TestDetachConfigValidation:
     def test_position_mode_rejects_invalid(self):
         with pytest.raises(ValueError, match="detach_position_mode"):
             LatentRuntimeConfig(detach_position_mode="garbage")
+
+    def test_fp32_default_false(self):
+        cfg = LatentRuntimeConfig()
+        assert cfg.fp32 is False
+
+    def test_fp32_accepts_true_with_bf16_false(self):
+        cfg = LatentRuntimeConfig(bf16=False, fp32=True)
+        assert cfg.fp32 is True
+        assert cfg.bf16 is False
+
+    def test_fp32_and_bf16_mutually_exclusive(self):
+        with pytest.raises(ValueError, match="fp32"):
+            LatentRuntimeConfig(bf16=True, fp32=True)
+
+
+class TestResolveRuntimeDtype:
+    """Verify dtype selection precedence across fp32 / bf16 / CUDA / CPU."""
+
+    def test_fp32_true_on_cpu(self, monkeypatch):
+        import torch as _torch
+        monkeypatch.setattr(_torch.cuda, "is_available", lambda: False)
+        cfg = LatentRuntimeConfig(bf16=False, fp32=True)
+        assert _resolve_runtime_dtype(cfg) is _torch.float32
+
+    def test_fp32_true_on_cuda_still_fp32(self, monkeypatch):
+        """Regression guard: fp32=True must override the CUDA-default fp16 path."""
+        import torch as _torch
+        monkeypatch.setattr(_torch.cuda, "is_available", lambda: True)
+        cfg = LatentRuntimeConfig(bf16=False, fp32=True)
+        assert _resolve_runtime_dtype(cfg) is _torch.float32
+
+    def test_bf16_true_on_cuda(self, monkeypatch):
+        import torch as _torch
+        monkeypatch.setattr(_torch.cuda, "is_available", lambda: True)
+        cfg = LatentRuntimeConfig(bf16=True, fp32=False)
+        assert _resolve_runtime_dtype(cfg) is _torch.bfloat16
+
+    def test_bf16_false_fp32_false_on_cuda_defaults_to_fp16(self, monkeypatch):
+        """Preserves existing behavior for the bf16=False, fp32=False case."""
+        import torch as _torch
+        monkeypatch.setattr(_torch.cuda, "is_available", lambda: True)
+        cfg = LatentRuntimeConfig(bf16=False, fp32=False)
+        assert _resolve_runtime_dtype(cfg) is _torch.float16
+
+    def test_cpu_always_fp32(self, monkeypatch):
+        """CPU path ignores bf16 flag and always uses fp32."""
+        import torch as _torch
+        monkeypatch.setattr(_torch.cuda, "is_available", lambda: False)
+        for bf16_val in [True, False]:
+            cfg = LatentRuntimeConfig(bf16=bf16_val, fp32=False)
+            assert _resolve_runtime_dtype(cfg) is _torch.float32
 
 
 def _graph_pair(seq_len: int):

@@ -63,7 +63,13 @@ class TrainingConfig:
         trainer_payload.setdefault("gradient_accumulation_steps", 1)
         trainer_payload.setdefault("num_train_epochs", 1)
         trainer_payload.setdefault("learning_rate", 8e-4)
-        trainer_payload.setdefault("bf16", self.runtime.bf16)
+        # Precision: if fp32 is forced, HF Trainer must NOT use bf16 (otherwise it would
+        # autocast to bf16 even with weights in fp32, defeating the fp32 control).
+        if self.runtime.fp32:
+            trainer_payload.setdefault("bf16", False)
+            trainer_payload.setdefault("fp16", False)
+        else:
+            trainer_payload.setdefault("bf16", self.runtime.bf16)
         trainer_payload.setdefault("save_safetensors", True)
         trainer_payload.setdefault("report_to", [])
         trainer_payload.setdefault("seed", self.runtime.seed)

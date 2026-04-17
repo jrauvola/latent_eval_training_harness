@@ -71,6 +71,10 @@ class LatentRuntimeConfig:
     ref_loss_factor: float = 1.0
     remove_eos: bool = True
     bf16: bool = True
+    #: Force fp32 throughout. Overrides bf16. On CUDA this is the ONLY way to get true fp32 —
+    #: setting bf16=False alone falls back to fp16 (not fp32) in runtime.py's dtype selection.
+    #: Set fp32=True (and bf16=False) when you want real fp32 training as a precision control.
+    fp32: bool = False
     seed: int = 11
     #: Wrap each benchmark prompt as a chat user turn (Qwen3, Llama-Instruct, etc.).
     use_chat_template: bool = False
@@ -93,4 +97,9 @@ class LatentRuntimeConfig:
             raise ValueError(
                 f"detach_position_mode must be 'all' or 'reasoning_only' "
                 f"(got {self.detach_position_mode!r})."
+            )
+        if self.fp32 and self.bf16:
+            raise ValueError(
+                "fp32 and bf16 are mutually exclusive; set at most one to True "
+                "(fp32=True forces full 32-bit precision; bf16=True uses bfloat16 on CUDA)."
             )

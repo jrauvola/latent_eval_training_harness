@@ -224,6 +224,24 @@ def _resolve_should_detach(
     return latent_index < num_latent - keep_last_k
 
 
+def _resolve_runtime_dtype(runtime_config: Any) -> torch.dtype:
+    """Select the runtime dtype based on config flags and hardware.
+
+    Precedence:
+    - ``fp32=True``: ``torch.float32`` (overrides everything).
+    - On CUDA: ``bf16=True`` → ``torch.bfloat16``, else ``torch.float16``.
+    - On CPU: always ``torch.float32``.
+
+    The common gotcha: on CUDA, ``bf16=False`` alone gives fp16, NOT fp32. Use
+    ``fp32=True`` when you actually want 32-bit precision.
+    """
+    if getattr(runtime_config, "fp32", False):
+        return torch.float32
+    if torch.cuda.is_available():
+        return torch.bfloat16 if runtime_config.bf16 else torch.float16
+    return torch.float32
+
+
 def _apply_boundary_detach(
     *,
     cache: Any,
@@ -278,11 +296,8 @@ class LatentReasoningRuntime(nn.Module):
         self.runtime_config = runtime_config
         self.train_mode = train_mode
 
-        if torch.cuda.is_available():
-            torch_dtype = torch.bfloat16 if runtime_config.bf16 else torch.float16
-        else:
-            torch_dtype = torch.float32
-        self.runtime_dtype = torch_dtype
+        self.runtime_dtype = _resolve_runtime_dtype(runtime_config)
+        torch_dtype = self.runtime_dtype
 
         quantization_config = None
         if model_config.load_in_4bit and torch.cuda.is_available():

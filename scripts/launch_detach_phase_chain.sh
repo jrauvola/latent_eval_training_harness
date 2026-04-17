@@ -32,12 +32,11 @@ TMUX_SESSION="${TMUX_SESSION:-detach_chain}"
 BARRIER_PID="${BARRIER_PID:-}"
 FEATURE_BRANCH="${FEATURE_BRANCH:-feature/detach-variants}"
 
-# Default queue: V2/V3/V4 bf16 then V2/V3/V4 fp32.
-# Phase 0 removed temporarily — see research_findings/phase0_failed_smoke/README.md.
-# Runtime.py:179-181 selects fp16 (not fp32) when bf16=false on CUDA, so the
-# current Phase 0 config exercises fp16+no-detach which is unsurprisingly
-# unstable. A real fp32 Phase 0 needs a harness fix first.
+# Default queue: Phase 0 first, then V2/V3/V4 bf16 full runs, then V2/V3/V4 fp32 controls.
+# All fp32 configs now set fp32:true to force true 32-bit precision (harness otherwise
+# falls back to fp16 when bf16=false on CUDA — see _resolve_runtime_dtype).
 DEFAULT_QUEUE=(
+  "configs/training/gemma3_4b_codi_gh200_phase0_fp32_no_detach.yaml"
   "configs/training/gemma3_4b_codi_gh200_v2_keep_last_2.yaml"
   "configs/training/gemma3_4b_codi_gh200_v3_reasoning_only.yaml"
   "configs/training/gemma3_4b_codi_gh200_v4_strict_no_latent_detach.yaml"

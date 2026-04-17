@@ -27,9 +27,7 @@ VARIANTS: list[tuple[str, str]] = [
     ("v2_keep_last_2", "gemma3_4b_codi_gh200_v2_keep_last_2.yaml"),
     ("v3_reasoning_only", "gemma3_4b_codi_gh200_v3_reasoning_only.yaml"),
     ("v4_strict_no_latent_detach", "gemma3_4b_codi_gh200_v4_strict_no_latent_detach.yaml"),
-    # phase0_fp32_no_detach removed: harness runtime.py selects fp16 (not fp32)
-    # when bf16=false on CUDA, making the current config's test question ill-posed.
-    # See research_findings/phase0_failed_smoke/README.md.
+    ("phase0_fp32_no_detach", "gemma3_4b_codi_gh200_phase0_fp32_no_detach.yaml"),
 ]
 SMOKE_STEPS = 10
 SMOKE_SAMPLES = 64
