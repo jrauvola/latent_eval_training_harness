@@ -57,7 +57,6 @@ printf '  - %s\n' "${QUEUE[@]}"
 echo ""
 
 # --- Push local branch so remote can fetch it -------------------------------
-echo "Pushing ${FEATURE_BRANCH} to origin..."
 pushd "${ROOT_DIR}" > /dev/null
 LOCAL_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 LOCAL_HEAD="$(git rev-parse HEAD)"
@@ -67,7 +66,7 @@ if [[ "${LOCAL_BRANCH}" != "${FEATURE_BRANCH}" ]]; then
   exit 2
 fi
 FEATURE_REF="${LOCAL_HEAD}"
-echo "Pinned SHA (FEATURE_REF): ${FEATURE_REF}"
+echo ">>> Pinned SHA (FEATURE_REF): ${FEATURE_REF}"
 echo "Pushing ${FEATURE_BRANCH} to origin..."
 git push origin "${FEATURE_BRANCH}"
 popd > /dev/null
