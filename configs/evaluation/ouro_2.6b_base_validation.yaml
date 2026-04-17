@@ -3,9 +3,9 @@ runtime:
   cache_dir: .cache/huggingface
   snapshot_dir: artifacts/datasets
   device: auto
-  batch_size: 4
+  batch_size: 8
   max_examples_per_benchmark:
-  max_new_tokens: 256
+  max_new_tokens: 512
   greedy: true
   temperature: 0.1
   top_k: 40
