@@ -1,11 +1,15 @@
 from __future__ import annotations
-from unittest.mock import patch
 
 import pytest
 import torch
 
+from latent_harness.core import runtime as rt_mod
 from latent_harness.core.config import LatentRuntimeConfig
-from latent_harness.core.runtime import _detach_cache
+from latent_harness.core.runtime import (
+    _apply_boundary_detach,
+    _detach_cache,
+    _resolve_should_detach,
+)
 
 
 class TestDetachConfigValidation:
@@ -200,8 +204,6 @@ class TestForwardDetachLogic:
         ],
     )
     def test_should_detach_per_iteration(self, num_latent, keep_last_k, expected):
-        from latent_harness.core.runtime import _resolve_should_detach
-
         actual = [
             _resolve_should_detach(
                 latent_index=i,
@@ -223,8 +225,6 @@ class TestForwardDetachCallSite:
 
     @pytest.fixture
     def recorded_calls(self, monkeypatch):
-        from latent_harness.core import runtime as rt_mod
-
         calls: list[dict] = []
         original = rt_mod._detach_cache
 
@@ -245,8 +245,6 @@ class TestForwardDetachCallSite:
         return cache
 
     def test_position_mode_all_passes_none(self, recorded_calls):
-        from latent_harness.core.runtime import _apply_boundary_detach
-
         cache = self._make_cache()
         _apply_boundary_detach(
             cache=cache,
@@ -259,8 +257,6 @@ class TestForwardDetachCallSite:
         assert recorded_calls == [{"detach_up_to_pos": None}]
 
     def test_position_mode_reasoning_only_passes_encoder_length(self, recorded_calls):
-        from latent_harness.core.runtime import _apply_boundary_detach
-
         cache = self._make_cache()
         _apply_boundary_detach(
             cache=cache,
