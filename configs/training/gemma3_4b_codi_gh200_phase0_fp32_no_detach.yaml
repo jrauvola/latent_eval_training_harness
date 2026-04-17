@@ -1,0 +1,97 @@
+method: codi
+
+# Phase 0: fp32 + no detach control run.
+#
+# This config is IDENTICAL to gemma3_4b_codi_gh200_full_detach_full_epoch.yaml
+# (the Probe E winning recipe) EXCEPT:
+#   - bf16: true  -> false        (flip precision)
+#   - detach_latent_between_steps: true -> false   (turn off detach)
+#   - detach_cache_between_steps:  true -> false   (turn off detach)
+#
+# Hypothesis: bf16's 7-bit mantissa — not the latent reasoning architecture —
+# was the root cause of the crashes documented in the stability writeup.  If
+# this config trains stably at fp32 without any detach, then V2/V3/V4 are
+# precision-regime engineering, not architectural science.  The claim "full
+# detach is necessary for Gemma-3-4B CODI" should narrow to "necessary *in
+# bf16*".
+#
+# Activations are ~2x larger at fp32; if OOM occurs, drop
+# per_device_train_batch_size from 4 to 2.
+
+model:
+  base_model_name_or_path: google/gemma-3-4b-it
+  hf_token:
+  lora_r: 16
+  lora_alpha: 16
+  lora_dropout: 0.1
+  lora_init: true
+  use_lora: true
+  full_precision: true
+  freeze_base_embeddings: true
+
+data:
+  dataset_names:
+    - gsm8k_aug_nl
+    - commonsense_cot
+    - strategyqa_cot
+    - prontoqa
+  registry_ids:
+    - numinamath_15
+    - openthoughts3_12m
+    - natural_reasoning
+    - proofwriter
+  registry_path: configs/datasets/full_registry.yaml
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets/training_snapshots
+  max_samples_per_dataset: 8192
+  include_last_cot: false
+  answer_only: false
+  max_token_num: 768
+  validation_split_ratio: 0.05
+  validation_max_samples: 2048
+
+runtime:
+  model_max_length: 768
+  num_latent: 2
+  detach_latent_between_steps: false    # Phase 0: NO detach
+  detach_cache_between_steps: false     # Phase 0: NO detach
+  detach_keep_last_k: null
+  detach_position_mode: all
+  use_prj: true
+  prj_dim: 2048
+  prj_dropout: 0.0
+  prj_no_ln: false
+  prj_fp32: true
+  prj_residual_gated: true
+  prj_gate_init: 0.0
+  distill_loss_div_std: true
+  distill_loss_std_floor: 0.001
+  distill_loss_type: smooth_l1
+  distill_loss_factor: 5.0
+  ref_loss_factor: 0.0
+  remove_eos: true
+  bf16: false                           # Phase 0: fp32 throughout
+  seed: 11
+
+trainer:
+  output_dir: artifacts/train/gemma3_4b_codi_gh200_phase0_fp32_no_detach
+  logging_dir: artifacts/train/gemma3_4b_codi_gh200_phase0_fp32_no_detach/logs
+  logging_steps: 1
+  logging_nan_inf_filter: false
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 1
+  num_train_epochs: 1
+  learning_rate: 0.00002
+  max_grad_norm: 1.0
+  eval_strategy: "no"
+  save_strategy: steps
+  save_steps: 500
+  load_best_model_at_end: false
+  save_total_limit: 3
+  save_safetensors: true
+  weight_decay: 0.1
+  warmup_ratio: 0.3
+  lr_scheduler_type: cosine
+  report_to: []
+  dataloader_num_workers: 4
