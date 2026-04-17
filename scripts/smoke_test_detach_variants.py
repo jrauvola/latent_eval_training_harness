@@ -51,6 +51,11 @@ def _materialize_smoke_config(src_cfg: Path, variant: str) -> Path:
     data = payload.setdefault("data", {})
     data["max_samples_per_dataset"] = SMOKE_SAMPLES
     data.pop("validation_max_samples", None)  # skip eval during smoke
+    # Drop heavy HF-registry datasets that would trigger multi-GB downloads
+    # during smoke. GSM8K-AUG-NL is lightweight and exercises the full training
+    # pipeline for bug-finding purposes; smoke doesn't need the full mix.
+    data["dataset_names"] = ["gsm8k_aug_nl"]
+    data["registry_ids"] = []
 
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", prefix=f"smoke_{variant}_", delete=False,
