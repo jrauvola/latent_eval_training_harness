@@ -1,4 +1,5 @@
 from __future__ import annotations
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -176,3 +177,97 @@ class TestDetachCacheDynamic:
         expected[:, :, 4:, :] = 2.0
         assert torch.allclose(src_k.grad, expected)
         assert torch.allclose(src_v.grad, expected)
+
+
+class TestForwardDetachLogic:
+    """Verify the step-boundary detach decision for various configs."""
+
+    @pytest.mark.parametrize(
+        "num_latent,keep_last_k,expected",
+        [
+            # Current behavior: keep_last_k=None means detach at every non-final boundary.
+            (2, None, [True]),                    # boundaries = [0]
+            (4, None, [True, True, True]),        # boundaries = [0,1,2]
+            # keep_last_k=1: same as current (only final connected)
+            (4, 1, [True, True, True]),
+            # keep_last_k=2: keep final + iter 2 connected -> detach at 0, 1
+            (4, 2, [True, True, False]),
+            # keep_last_k=3: keep final + iter 1, 2 connected -> detach at 0 only
+            (4, 3, [True, False, False]),
+            # keep_last_k=4: keep everything -> detach at nothing
+            (4, 4, [False, False, False]),
+            (6, 2, [True, True, True, True, False]),
+        ],
+    )
+    def test_should_detach_per_iteration(self, num_latent, keep_last_k, expected):
+        from latent_harness.core.runtime import _resolve_should_detach
+
+        actual = [
+            _resolve_should_detach(
+                latent_index=i,
+                num_latent=num_latent,
+                keep_last_k=keep_last_k,
+            )
+            for i in range(num_latent - 1)
+        ]
+        assert actual == expected
+
+
+class TestForwardDetachCallSite:
+    """Spy on ``_detach_cache`` to verify forward-loop wiring passes the correct cutoff.
+
+    Rather than instantiating a full HF model, we call the extracted
+    ``_apply_boundary_detach`` helper directly and record the args it passes
+    into ``_detach_cache``.
+    """
+
+    @pytest.fixture
+    def recorded_calls(self, monkeypatch):
+        from latent_harness.core import runtime as rt_mod
+
+        calls: list[dict] = []
+        original = rt_mod._detach_cache
+
+        def spy(past_key_values, *, detach_up_to_pos=None):
+            calls.append({"detach_up_to_pos": detach_up_to_pos})
+            return original(past_key_values, detach_up_to_pos=detach_up_to_pos)
+
+        monkeypatch.setattr(rt_mod, "_detach_cache", spy)
+        return calls
+
+    def _make_cache(self):
+        try:
+            from transformers.cache_utils import DynamicCache
+        except ImportError:
+            pytest.skip("DynamicCache not available")
+        cache = DynamicCache()
+        cache.update(torch.randn(1, 1, 7, 4), torch.randn(1, 1, 7, 4), 0)
+        return cache
+
+    def test_position_mode_all_passes_none(self, recorded_calls):
+        from latent_harness.core.runtime import _apply_boundary_detach
+
+        cache = self._make_cache()
+        _apply_boundary_detach(
+            cache=cache,
+            latent=torch.randn(1, 1, 8),
+            encoder_length=5,
+            runtime_config_detach_latent=True,
+            runtime_config_detach_cache=True,
+            detach_position_mode="all",
+        )
+        assert recorded_calls == [{"detach_up_to_pos": None}]
+
+    def test_position_mode_reasoning_only_passes_encoder_length(self, recorded_calls):
+        from latent_harness.core.runtime import _apply_boundary_detach
+
+        cache = self._make_cache()
+        _apply_boundary_detach(
+            cache=cache,
+            latent=torch.randn(1, 1, 8),
+            encoder_length=5,
+            runtime_config_detach_latent=True,
+            runtime_config_detach_cache=True,
+            detach_position_mode="reasoning_only",
+        )
+        assert recorded_calls == [{"detach_up_to_pos": 5}]

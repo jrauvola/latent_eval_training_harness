@@ -202,6 +202,53 @@ def _detach_cache(
     return past_key_values
 
 
+def _resolve_should_detach(
+    *,
+    latent_index: int,
+    num_latent: int,
+    keep_last_k: int | None,
+) -> bool:
+    """Decide whether to detach at the boundary AFTER latent step ``latent_index``.
+
+    Only called for non-final boundaries (``latent_index < num_latent - 1``).
+
+    Rules:
+    - ``keep_last_k`` in ``(None, 1)``: detach at every non-final boundary
+      (current behavior).
+    - ``keep_last_k == K`` with ``K > 1``: detach only at boundaries
+      ``i < num_latent - K``. This keeps the last ``K`` latent steps'
+      gradients connected.
+    """
+    if keep_last_k is None or keep_last_k <= 1:
+        return True
+    return latent_index < num_latent - keep_last_k
+
+
+def _apply_boundary_detach(
+    *,
+    cache: Any,
+    latent: torch.Tensor,
+    encoder_length: int,
+    runtime_config_detach_latent: bool,
+    runtime_config_detach_cache: bool,
+    detach_position_mode: str,
+) -> tuple[Any, torch.Tensor]:
+    """Apply latent-embedding and KV-cache detach at a non-final boundary.
+
+    Returns the (possibly-detached) cache and latent. Called only when
+    ``_resolve_should_detach`` decided this boundary should be detached.
+    """
+    new_latent = latent.detach() if runtime_config_detach_latent else latent
+    new_cache = cache
+    if runtime_config_detach_cache:
+        if detach_position_mode == "reasoning_only":
+            detach_up_to = encoder_length
+        else:
+            detach_up_to = None
+        new_cache = _detach_cache(cache, detach_up_to_pos=detach_up_to)
+    return new_cache, new_latent
+
+
 def get_text_config_attr(config: Any, attr_name: str) -> Any:
     if hasattr(config, attr_name):
         return getattr(config, attr_name)
@@ -613,10 +660,20 @@ class LatentReasoningRuntime(nn.Module):
             latent = latent_outputs.hidden_states[-1][:, -1:, :]
             latent = self.maybe_project(latent)
             if latent_index < self.runtime_config.num_latent - 1:
-                if self.runtime_config.detach_latent_between_steps:
-                    latent = latent.detach()
-                if self.runtime_config.detach_cache_between_steps:
-                    past_key_values = _detach_cache(past_key_values)
+                should_detach = _resolve_should_detach(
+                    latent_index=latent_index,
+                    num_latent=self.runtime_config.num_latent,
+                    keep_last_k=self.runtime_config.detach_keep_last_k,
+                )
+                if should_detach:
+                    past_key_values, latent = _apply_boundary_detach(
+                        cache=past_key_values,
+                        latent=latent,
+                        encoder_length=encoder_input_ids.size(1),
+                        runtime_config_detach_latent=self.runtime_config.detach_latent_between_steps,
+                        runtime_config_detach_cache=self.runtime_config.detach_cache_between_steps,
+                        detach_position_mode=self.runtime_config.detach_position_mode,
+                    )
             self._ensure_finite(
                 latent,
                 stage="latent_rollout",
