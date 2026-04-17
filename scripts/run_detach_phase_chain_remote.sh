@@ -142,6 +142,29 @@ TrainingConfig.from_dict(yaml.safe_load(open('${HARNESS_DIR}/${cfg}')))
   return 0
 }
 
+# Runs the smoke gate. Returns the smoke runner's exit code.
+# Smoke logs land in ${SMOKE_LOG_DIR} via the smoke script itself.
+run_smoke_gate() {
+  log "Running smoke gate..."
+  mkdir -p "${SMOKE_LOG_DIR}"
+  local smoke_stdout="${SMOKE_LOG_DIR}/smoke_runner.log"
+  cd "${HARNESS_DIR}"
+  set +e
+  PYTHONPATH=src "${HARNESS_DIR}/.venv/bin/python" \
+    scripts/smoke_test_detach_variants.py \
+    > "${smoke_stdout}" 2>&1
+  local rc=$?
+  set -e
+  if (( rc == 0 )); then
+    log "smoke: all variants passed"
+    update_status "smoke_passed"
+  else
+    log "smoke: failed (exit=${rc}) - see ${smoke_stdout}"
+    update_status "smoke_failed: exit=${rc}"
+  fi
+  return "${rc}"
+}
+
 # -------- Phase 0: wait for barrier PID (the current Ouro eval) -------------
 if [[ -n "${BARRIER_PID:-}" ]]; then
   log "Waiting for BARRIER_PID=${BARRIER_PID} to exit..."
