@@ -27,6 +27,7 @@ VARIANTS: list[tuple[str, str]] = [
     ("v2_keep_last_2", "gemma3_4b_codi_gh200_v2_keep_last_2.yaml"),
     ("v3_reasoning_only", "gemma3_4b_codi_gh200_v3_reasoning_only.yaml"),
     ("v4_strict_no_latent_detach", "gemma3_4b_codi_gh200_v4_strict_no_latent_detach.yaml"),
+    ("phase0_fp32_no_detach", "gemma3_4b_codi_gh200_phase0_fp32_no_detach.yaml"),
 ]
 SMOKE_STEPS = 10
 SMOKE_SAMPLES = 64
@@ -37,7 +38,7 @@ def _materialize_smoke_config(src_cfg: Path, variant: str) -> Path:
     with src_cfg.open() as f:
         payload = yaml.safe_load(f)
 
-    out_dir = HARNESS_ROOT / "artifacts" / "smoke" / variant
+    out_dir = HARNESS_ROOT / "artifacts" / "chain" / "smoke" / variant
     out_dir.mkdir(parents=True, exist_ok=True)
 
     trainer = payload.setdefault("trainer", {})
