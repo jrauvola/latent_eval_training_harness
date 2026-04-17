@@ -24,8 +24,13 @@ set -euo pipefail
 HARNESS_DIR="${HARNESS_DIR:-$HOME/Latent_Reasoning_Project/latent_eval_training_harness}"
 FEATURE_BRANCH="${FEATURE_BRANCH:-feature/detach-variants}"
 FEATURE_REF="${FEATURE_REF:-}"
-ABORT_ON_FAIL="${ABORT_ON_FAIL:-1}"
 CHAIN_LOG_DIR="${CHAIN_LOG_DIR:-${HARNESS_DIR}/artifacts/chain}"
+SMOKE_LOG_DIR="${CHAIN_LOG_DIR}/smoke"
+
+if [[ -z "${FEATURE_REF}" ]]; then
+  echo "ERROR: FEATURE_REF (expected git SHA) is required" >&2
+  exit 2
+fi
 
 if [[ -z "${CONFIGS:-}" ]]; then
   echo "ERROR: CONFIGS env var is required (newline-separated list of YAML paths)"
@@ -47,6 +52,94 @@ log() {
 update_status() {
   # Append a single status line. Local poller tails this file.
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "${STATUS_FILE}"
+}
+
+# Runs all 6 pre-flight checks. Returns 0 if all pass, non-zero otherwise.
+# Prints a human-readable report to stdout and the chain log.
+run_preflight_checks() {
+  log "Running pre-flight checks..."
+  local failures=0
+
+  # Check 1: Disk free >= 100 GB on /home/ubuntu
+  local kb_free
+  kb_free="$(df --output=avail /home/ubuntu | tail -1 | tr -d ' ')"
+  local gb_free=$((kb_free / 1024 / 1024))
+  if (( gb_free < 100 )); then
+    log "FAIL preflight[1/6] disk: only ${gb_free}GB free, need >=100GB"
+    failures=$((failures + 1))
+  else
+    log "ok   preflight[1/6] disk: ${gb_free}GB free"
+  fi
+
+  # Check 2: HF auth + tokenizer sanity for google/gemma-3-4b-it
+  if "${HARNESS_DIR}/.venv/bin/python" -c "
+from transformers import AutoTokenizer
+AutoTokenizer.from_pretrained('google/gemma-3-4b-it')
+" > /tmp/preflight_hf.log 2>&1; then
+    log "ok   preflight[2/6] hf auth + tokenizer: gemma-3-4b-it reachable"
+  else
+    log "FAIL preflight[2/6] hf auth + tokenizer: see /tmp/preflight_hf.log"
+    failures=$((failures + 1))
+  fi
+
+  # Check 3: Harness imports from venv
+  if "${HARNESS_DIR}/.venv/bin/python" -c "
+import sys; sys.path.insert(0, '${HARNESS_DIR}/src')
+from latent_harness.core.runtime import _apply_boundary_detach, _resolve_should_detach, _detach_cache
+" > /tmp/preflight_harness.log 2>&1; then
+    log "ok   preflight[3/6] harness imports: runtime helpers resolvable"
+  else
+    log "FAIL preflight[3/6] harness imports: see /tmp/preflight_harness.log"
+    failures=$((failures + 1))
+  fi
+
+  # Check 4: Dry-run loader for each queued config
+  local cfg bad_cfgs=""
+  for cfg in "${CONFIG_LIST[@]}"; do
+    if ! "${HARNESS_DIR}/.venv/bin/python" -c "
+import sys; sys.path.insert(0, '${HARNESS_DIR}/src')
+import yaml
+from latent_harness.training.config import TrainingConfig
+TrainingConfig.from_dict(yaml.safe_load(open('${HARNESS_DIR}/${cfg}')))
+" > /tmp/preflight_loader.log 2>&1; then
+      bad_cfgs="${bad_cfgs}${cfg} "
+    fi
+  done
+  if [[ -z "${bad_cfgs}" ]]; then
+    log "ok   preflight[4/6] dry-run loader: ${#CONFIG_LIST[@]} configs parse"
+  else
+    log "FAIL preflight[4/6] dry-run loader fail on: ${bad_cfgs}(see /tmp/preflight_loader.log)"
+    failures=$((failures + 1))
+  fi
+
+  # Check 5: Git working tree clean
+  cd "${HARNESS_DIR}"
+  if [[ -z "$(git status --porcelain)" ]]; then
+    log "ok   preflight[5/6] git clean: no uncommitted changes"
+  else
+    log "FAIL preflight[5/6] git dirty:"
+    git status --short | sed 's/^/       /' | tee -a "${CHAIN_LOG}"
+    failures=$((failures + 1))
+  fi
+
+  # Check 6: git HEAD == FEATURE_REF (exact SHA pin)
+  local head_sha
+  head_sha="$(git rev-parse HEAD)"
+  if [[ "${head_sha}" == "${FEATURE_REF}" ]]; then
+    log "ok   preflight[6/6] git HEAD == FEATURE_REF (${FEATURE_REF})"
+  else
+    log "FAIL preflight[6/6] git HEAD (${head_sha}) != FEATURE_REF (${FEATURE_REF})"
+    failures=$((failures + 1))
+  fi
+
+  if (( failures > 0 )); then
+    log "pre-flight: ${failures} check(s) failed; aborting chain"
+    update_status "preflight_failed: ${failures}"
+    return 1
+  fi
+  log "pre-flight: all 6 checks passed"
+  update_status "preflight_passed"
+  return 0
 }
 
 # -------- Phase 0: wait for barrier PID (the current Ouro eval) -------------
