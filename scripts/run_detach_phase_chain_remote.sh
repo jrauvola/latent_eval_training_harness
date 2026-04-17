@@ -14,9 +14,8 @@
 # Env vars (all optional unless noted):
 #   BARRIER_PID      - Wait for this PID to exit before starting. Empty = skip.
 #   FEATURE_BRANCH   - Git branch to check out. Default: feature/detach-variants
-#   FEATURE_REF      - Git ref to pin (SHA). If set, overrides the branch tip.
+#   FEATURE_REF      - Git ref to pin (SHA). REQUIRED.
 #   CONFIGS          - Newline-separated list of config paths (REQUIRED).
-#   ABORT_ON_FAIL    - "1" to stop the chain if any run fails. Default: "1".
 #   CHAIN_LOG_DIR    - Dir for chain-level progress log. Default: artifacts/chain.
 
 set -euo pipefail
@@ -188,19 +187,28 @@ REMOTE_HEAD="$(git rev-parse HEAD)"
 log "Remote HEAD pinned at ${REMOTE_HEAD}"
 update_status "git_checked_out: ${REMOTE_HEAD}"
 
-# -------- Phase 2: iterate over configs --------------------------------------
-# Parse CONFIGS as a newline-separated list (preserves ordering).
+# Load CONFIG_LIST early so pre-flight check #4 can dry-run each config.
 mapfile -t CONFIG_LIST < <(printf '%s\n' "${CONFIGS}" | sed '/^$/d')
 
-log "Chain begin: ${#CONFIG_LIST[@]} config(s) queued"
+# -------- Phase 2: pre-flight checks ----------------------------------------
+if ! run_preflight_checks; then
+  exit 2
+fi
+
+# -------- Phase 3: smoke gate -----------------------------------------------
+if ! run_smoke_gate; then
+  exit 3
+fi
+
+# -------- Phase 4: main training chain (continue on failure) ----------------
+log "Chain begin: main training loop over ${#CONFIG_LIST[@]} config(s)"
 for cfg_path in "${CONFIG_LIST[@]}"; do
   log "========================================================"
   log "Starting run: ${cfg_path}"
 
   if [[ ! -f "${HARNESS_DIR}/${cfg_path}" ]]; then
-    log "FAIL (missing config): ${cfg_path}"
+    log "FAIL (missing config): ${cfg_path}; continuing"
     update_status "missing_config: ${cfg_path}"
-    [[ "${ABORT_ON_FAIL}" == "1" ]] && exit 3
     continue
   fi
 
@@ -212,9 +220,8 @@ with open(sys.argv[1]) as f:
 print(cfg.get('trainer', {}).get('output_dir', ''))
 " "${HARNESS_DIR}/${cfg_path}")
   if [[ -z "${out_dir}" ]]; then
-    log "FAIL (no output_dir in config): ${cfg_path}"
+    log "FAIL (no output_dir in config): ${cfg_path}; continuing"
     update_status "no_output_dir: ${cfg_path}"
-    [[ "${ABORT_ON_FAIL}" == "1" ]] && exit 4
     continue
   fi
 
@@ -243,12 +250,8 @@ print(cfg.get('trainer', {}).get('output_dir', ''))
   else
     touch "${HARNESS_DIR}/${out_dir}/.failed"
     echo "${rc}" > "${HARNESS_DIR}/${out_dir}/.exit_code"
-    log "FAILED: ${cfg_path} (exit=${rc})"
+    log "FAILED: ${cfg_path} (exit=${rc}); continuing to next config (main chain is continue-on-fail)"
     update_status "failed: ${cfg_path} exit=${rc}"
-    if [[ "${ABORT_ON_FAIL}" == "1" ]]; then
-      log "ABORT_ON_FAIL=1; stopping chain."
-      exit "${rc}"
-    fi
   fi
 done
 
