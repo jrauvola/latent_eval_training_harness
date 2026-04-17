@@ -162,6 +162,10 @@ def _load_standard_generation_model(
         if device is not None and getattr(model, "hf_device_map", None) is None:
             model = model.to(device)
         model.eval()
+        if spec.disable_kv_cache:
+            if getattr(model, "generation_config", None) is not None:
+                model.generation_config.use_cache = False
+            model.config.use_cache = False
         return EvaluationModelHandle(
             name=spec.name,
             model_kind=spec.model_kind,

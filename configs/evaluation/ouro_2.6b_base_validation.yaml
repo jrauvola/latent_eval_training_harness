@@ -22,6 +22,7 @@ models:
     model_kind: causal_lm
     inference_strategy: standard_generation
     trust_remote_code: true
+    disable_kv_cache: true
     model:
       base_model_name_or_path: ByteDance/Ouro-2.6B
       use_lora: false

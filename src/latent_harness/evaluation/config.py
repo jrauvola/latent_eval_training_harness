@@ -48,6 +48,10 @@ class EvaluationModelSpec:
     #: Pass ``trust_remote_code=True`` to HF ``from_pretrained`` calls. Required for models
     #: with custom modeling code (e.g., Ouro's looped forward pass).
     trust_remote_code: bool = False
+    #: Force ``use_cache=False`` during generation by overriding the model's ``generation_config``.
+    #: Required for Ouro checkpoints whose custom ``UniversalTransformerCache`` class is
+    #: incompatible with the ``Cache.key_cache`` property in transformers>=4.52.
+    disable_kv_cache: bool = False
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "EvaluationModelSpec":
@@ -72,6 +76,7 @@ class EvaluationModelSpec:
             hf_checkpoint_state_dict_prefix=payload.get("hf_checkpoint_state_dict_prefix"),
             hf_extra_special_tokens=payload.get("hf_extra_special_tokens"),
             trust_remote_code=payload.get("trust_remote_code", False),
+            disable_kv_cache=payload.get("disable_kv_cache", False),
         )
 
 
