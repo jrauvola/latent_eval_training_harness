@@ -45,6 +45,9 @@ class EvaluationModelSpec:
     hf_checkpoint_state_dict_prefix: str | None = None
     #: Added via ``add_special_tokens`` before loading weights (e.g. COCONUT pause/latent tokens).
     hf_extra_special_tokens: list[str] | None = None
+    #: Pass ``trust_remote_code=True`` to HF ``from_pretrained`` calls. Required for models
+    #: with custom modeling code (e.g., Ouro's looped forward pass).
+    trust_remote_code: bool = False
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "EvaluationModelSpec":
@@ -68,6 +71,7 @@ class EvaluationModelSpec:
             hf_hub_filename=payload.get("hf_hub_filename"),
             hf_checkpoint_state_dict_prefix=payload.get("hf_checkpoint_state_dict_prefix"),
             hf_extra_special_tokens=payload.get("hf_extra_special_tokens"),
+            trust_remote_code=payload.get("trust_remote_code", False),
         )
 
 
