@@ -62,9 +62,13 @@ pushd "${ROOT_DIR}" > /dev/null
 LOCAL_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 LOCAL_HEAD="$(git rev-parse HEAD)"
 if [[ "${LOCAL_BRANCH}" != "${FEATURE_BRANCH}" ]]; then
-  echo "WARNING: local HEAD is on '${LOCAL_BRANCH}', not '${FEATURE_BRANCH}'."
-  echo "         The chain will pin to ${FEATURE_BRANCH}'s tip on origin, not ${LOCAL_HEAD}."
+  echo "ERROR: local HEAD is on '${LOCAL_BRANCH}', not '${FEATURE_BRANCH}'." >&2
+  echo "       Switch to ${FEATURE_BRANCH} or override FEATURE_BRANCH=${LOCAL_BRANCH}." >&2
+  exit 2
 fi
+FEATURE_REF="${LOCAL_HEAD}"
+echo "Pinned SHA (FEATURE_REF): ${FEATURE_REF}"
+echo "Pushing ${FEATURE_BRANCH} to origin..."
 git push origin "${FEATURE_BRANCH}"
 popd > /dev/null
 echo ""
@@ -115,8 +119,8 @@ chmod +x ${REMOTE_SCRIPT_PATH}
 tmux new-session -d -s ${TMUX_SESSION} \
   "BARRIER_PID='${BARRIER_PID}' \
    FEATURE_BRANCH='${FEATURE_BRANCH}' \
+   FEATURE_REF='${FEATURE_REF}' \
    CONFIGS=\"\$(cat ${REMOTE_CONFIG_FILE})\" \
-   ABORT_ON_FAIL=1 \
    bash ${REMOTE_SCRIPT_PATH} 2>&1 | tee /tmp/detach_chain_tee.log; \
    echo; echo '--- chain ended. press enter to close tmux window ---'; read"
 echo "Chain started in tmux session '${TMUX_SESSION}'."
