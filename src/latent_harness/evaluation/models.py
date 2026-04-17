@@ -133,7 +133,7 @@ def _load_standard_generation_model(
             torch_dtype = torch.float32
         tokenizer = AutoTokenizer.from_pretrained(
             spec.checkpoint_source,
-            subfolder=spec.hf_subfolder,
+            subfolder=spec.hf_subfolder or "",
             token=resolve_hf_hub_token(spec.model.hf_token),
             model_max_length=spec.runtime.model_max_length,
             padding_side="left",
@@ -156,7 +156,7 @@ def _load_standard_generation_model(
             load_kw["device_map"] = "auto"
         model = AutoModelForCausalLM.from_pretrained(
             spec.checkpoint_source,
-            subfolder=spec.hf_subfolder,
+            subfolder=spec.hf_subfolder or "",
             **load_kw,
         )
         if device is not None and getattr(model, "hf_device_map", None) is None:
