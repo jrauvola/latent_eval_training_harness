@@ -1,0 +1,46 @@
+runtime:
+  output_dir: artifacts/eval/gemma3_4b_codi_gh200_full_detach_full_epoch_eval
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 4
+  progress_log_interval_batches: 10
+  max_examples_per_benchmark: 256
+  max_new_tokens: 128
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+benchmarks:
+  - gsm8k
+  - svamp
+  - gsm-hard
+  - multi-arith
+  - commonsense_qa
+
+models:
+  - name: gemma3_4b_codi_full_detach_full_epoch
+    checkpoint_source: artifacts/train/gemma3_4b_codi_gh200_full_detach_full_epoch
+    checkpoint_type: local_path
+    model_kind: latent_runtime
+    inference_strategy: latent_cot
+    model:
+      base_model_name_or_path: google/gemma-3-4b-it
+      lora_r: 16
+      lora_alpha: 16
+      use_lora: true
+      freeze_base_embeddings: true
+    runtime:
+      model_max_length: 768
+      num_latent: 2
+      detach_latent_between_steps: true
+      detach_cache_between_steps: true
+      use_prj: true
+      prj_dim: 2048
+      prj_dropout: 0.0
+      prj_fp32: true
+      prj_residual_gated: true
+      prj_gate_init: 0.0
+      remove_eos: true
+      bf16: true

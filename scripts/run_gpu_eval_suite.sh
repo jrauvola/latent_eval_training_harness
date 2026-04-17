@@ -21,6 +21,11 @@ if [[ -f ".env" ]]; then
   set +a
 fi
 
+if [[ -n "${HUGGINGFACE_TOKEN:-}" ]]; then
+  export HF_TOKEN="${HF_TOKEN:-$HUGGINGFACE_TOKEN}"
+  export HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HUGGINGFACE_TOKEN}"
+fi
+
 if [[ -d ".venv" ]]; then
   # shellcheck disable=SC1091
   source ".venv/bin/activate"

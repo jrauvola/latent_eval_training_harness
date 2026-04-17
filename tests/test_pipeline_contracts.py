@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -101,6 +102,75 @@ def test_eval_model_spec_accepts_legacy_flat_fields() -> None:
     assert spec.runtime.num_latent == 4
 
 
+def test_eval_model_spec_supports_hf_hub_filename_and_coconut_loaders() -> None:
+    spec = EvaluationModelSpec.from_dict(
+        {
+            "name": "coconut_ckpt",
+            "checkpoint_source": "bmarti44/coconut-curriculum-checkpoints",
+            "checkpoint_type": "hf_repo",
+            "hf_hub_filename": "coconut/checkpoint_best",
+            "hf_checkpoint_state_dict_prefix": "base_causallm",
+            "hf_extra_special_tokens": ["<|start-latent|>", "<|end-latent|>", "<|latent|>"],
+            "model_kind": "causal_lm",
+            "inference_strategy": "standard_generation",
+            "model": {"base_model_name_or_path": "openai-community/gpt2", "use_lora": False},
+            "runtime": {"model_max_length": 512, "use_prj": False, "num_latent": 0},
+        }
+    )
+    assert spec.hf_hub_filename == "coconut/checkpoint_best"
+    assert spec.hf_checkpoint_state_dict_prefix == "base_causallm"
+    assert spec.hf_extra_special_tokens == ["<|start-latent|>", "<|end-latent|>", "<|latent|>"]
+
+
+def test_resolve_checkpoint_path_uses_hf_hub_filename(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict = {}
+
+    def _fake_hf_hub_download(**kwargs: object) -> str:
+        calls.update(kwargs)
+        return "/tmp/fake_weights.bin"
+
+    monkeypatch.setattr(
+        "latent_harness.core.checkpoints.hf_hub_download",
+        _fake_hf_hub_download,
+    )
+    resolved = resolve_checkpoint_path(
+        "bmarti44/coconut-curriculum-checkpoints",
+        "hf_repo",
+        hf_hub_filename="coconut/checkpoint_best",
+        token="tok",
+    )
+    assert resolved == "/tmp/fake_weights.bin"
+    assert calls["repo_id"] == "bmarti44/coconut-curriculum-checkpoints"
+    assert calls["filename"] == "coconut/checkpoint_best"
+    assert calls["token"] == "tok"
+
+
+def test_eval_model_spec_supports_hf_pretrained_subfolder() -> None:
+    spec = EvaluationModelSpec.from_dict(
+        {
+            "name": "laura_llama8b",
+            "checkpoint_source": "LauraGG/latent-reasoning-llama8b-fft",
+            "checkpoint_type": "hf_pretrained",
+            "hf_subfolder": "coconut_instruct_59pct",
+            "model_kind": "causal_lm",
+            "inference_strategy": "standard_generation",
+            "model": {
+                "base_model_name_or_path": "LauraGG/latent-reasoning-llama8b-fft",
+                "use_lora": False,
+            },
+            "runtime": {
+                "model_max_length": 512,
+                "use_prj": False,
+                "num_latent": 0,
+            },
+        }
+    )
+
+    assert spec.checkpoint_type == "hf_pretrained"
+    assert spec.hf_subfolder == "coconut_instruct_59pct"
+    assert spec.model_kind == "causal_lm"
+
+
 def test_eval_model_spec_supports_base_model_standard_generation() -> None:
     spec = EvaluationModelSpec.from_dict(
         {
@@ -193,6 +263,7 @@ def test_latent_trainer_save_model_uses_atomic_contract(tmp_path) -> None:
         args=SimpleNamespace(output_dir=str(tmp_path / "default")),
         processing_class=processor,
         tokenizer=None,
+        _record_event=lambda *args, **kwargs: None,
     )
 
     LatentTrainer.save_model(dummy_trainer, output_dir=str(tmp_path / "checkpoint"))

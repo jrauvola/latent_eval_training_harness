@@ -1,4 +1,5 @@
 .venv/
+.venv-*/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -6,6 +7,7 @@ __pycache__/
 artifacts/
 .env
 docs/
+bloom_smoketest/
 *.egg-info/
 *.pyc
 *.pyo

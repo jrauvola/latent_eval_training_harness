@@ -1,6 +1,25 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+def resolve_hf_hub_token(explicit: str | None = None) -> str | None:
+    """Prefer YAML/model `hf_token`, then env vars, then the default CLI token file."""
+    if explicit:
+        return explicit
+    env = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if env:
+        return env.strip() or None
+    path = Path.home() / ".cache/huggingface/token"
+    if path.is_file():
+        try:
+            return path.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
+    return None
 
 
 @dataclass(slots=True)
@@ -10,24 +29,41 @@ class ModelConfig:
     lora_r: int = 128
     lora_alpha: int = 32
     lora_dropout: float = 0.1
+    lora_target_modules: list[str] | None = None
     lora_init: bool = True
     use_lora: bool = True
     full_precision: bool = True
     load_in_4bit: bool = False
+    freeze_base_embeddings: bool = False
 
 
 @dataclass(slots=True)
 class LatentRuntimeConfig:
     model_max_length: int = 512
     num_latent: int = 6
+    #: Detach the latent hidden state between non-final latent rollout steps.
+    detach_latent_between_steps: bool = False
+    #: Detach the KV cache between non-final latent rollout steps (requires DynamicCache support).
+    detach_cache_between_steps: bool = False
     use_prj: bool = True
     prj_dim: int = 2048
     prj_dropout: float = 0.0
     prj_no_ln: bool = False
+    #: Run the projection MLP in float32 for numerical stability (activations cast back after).
+    prj_fp32: bool = False
+    #: Use ``x + alpha * F(x)`` with trainable ``alpha`` (ReZero-style) instead of ``F(x)`` alone.
+    prj_residual_gated: bool = False
+    #: Initial value for the residual gate ``alpha`` (typically 0.0 so the loop starts near identity).
+    prj_gate_init: float = 0.0
     distill_loss_div_std: bool = True
+    distill_loss_std_floor: float = 1e-6
     distill_loss_type: str = "smooth_l1"
     distill_loss_factor: float = 20.0
     ref_loss_factor: float = 1.0
     remove_eos: bool = True
     bf16: bool = True
     seed: int = 11
+    #: Wrap each benchmark prompt as a chat user turn (Qwen3, Llama-Instruct, etc.).
+    use_chat_template: bool = False
+    #: Extra kwargs for ``tokenizer.apply_chat_template`` (e.g. ``enable_thinking`` for Qwen3).
+    chat_template_kwargs: dict[str, Any] | None = None

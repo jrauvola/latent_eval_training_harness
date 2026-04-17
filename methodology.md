@@ -193,6 +193,12 @@ Every training methodology we add should be describable on the same axes:
   be too weak on its own, so if we add COCONUT here we should consider stronger
   validation around latent stability, checkpoint selection, and possibly richer
   supervision hooks rather than treating the curriculum alone as sufficient
+- External ProsQA curriculum checkpoints:
+  [bmarti44/coconut-curriculum-checkpoints](https://huggingface.co/bmarti44/coconut-curriculum-checkpoints)
+  stores `torch.save` blobs at paths like `coconut/checkpoint_best` (single
+  Hub file). The harness resolves them with `hf_hub_filename` and strips the
+  `base_causallm.` prefix for `causal_lm` loads; see
+  `configs/evaluation/bmarti44_coconut_gpt2_best_smoke.yaml`.
 
 ## SIM-CoT
 

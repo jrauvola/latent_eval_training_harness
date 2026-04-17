@@ -13,10 +13,14 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_BASE_URL = os.getenv("LAMBDA_CLOUD_BASE_URL", "https://cloud.lambdalabs.com")
+# Order matters: first usable (non-SSH-pubkey) value wins.
+# SPAR_LAMBDA_API_KEY is the primary slot for many team .env files; see _looks_like_ssh_public_key.
 TOKEN_ENV_VARS = (
     "LAMBDA_CLOUD_API_TOKEN",
     "LAMBDA_CLOUD_TOKEN",
     "LAMBDA_API_TOKEN",
+    "SPAR_LAMBDA_API_KEY",
+    "LAMBDA_API_KEY",
 )
 DEFAULT_STATUSES = ("active",)
 
@@ -70,13 +74,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _looks_like_ssh_public_key(value: str) -> bool:
+    """True if value looks like an OpenSSH public key line; not a Cloud API bearer token."""
+    s = value.strip()
+    return s.startswith(("ssh-rsa", "ssh-ed25519", "ecdsa-", "sk-"))
+
+
 def resolve_token(explicit_token: str | None) -> str:
     if explicit_token:
         return explicit_token
     for env_name in TOKEN_ENV_VARS:
         value = os.getenv(env_name)
-        if value:
-            return value
+        if not value:
+            continue
+        if _looks_like_ssh_public_key(value):
+            continue
+        return value.strip()
     raise SystemExit(
         "No Lambda Cloud API token found. Set one of "
         f"{', '.join(TOKEN_ENV_VARS)} or provide --token."

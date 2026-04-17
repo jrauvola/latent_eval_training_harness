@@ -5,17 +5,21 @@ PROJECT_DIR=""
 REPO_URL=""
 INSTALL_VLLM=0
 SKIP_SETUP=0
+GIT_BRANCH=""
+GIT_REF=""
 
 usage() {
   cat <<'EOF'
 Bootstrap a Lambda GPU box for the latent eval harness.
 
 Usage:
-  bash bootstrap_lambda_gpu_remote.sh --project-dir /home/ubuntu/Latent_Reasoning_Project/latent_eval_training_harness --repo-url https://github.com/example/repo.git
+  bash bootstrap_lambda_gpu_remote.sh --project-dir /home/ubuntu/Latent_Reasoning_Project/latent_eval_training_harness --repo-url https://github.com/example/repo.git --branch main --ref abc1234
 
 Options:
   --project-dir PATH   Absolute remote path where the harness repo should live.
   --repo-url URL       Git URL to clone when the box is fresh.
+  --branch NAME        Branch to clone/pull before running.
+  --ref SHA            Exact git ref/commit to checkout after fetch.
   --install-vllm       Install vLLM during environment setup.
   --skip-setup         Clone only; do not run scripts/setup_gpu_eval_env.sh.
   -h, --help           Show this help message.
@@ -30,6 +34,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --repo-url)
       REPO_URL="${2:-}"
+      shift 2
+      ;;
+    --branch)
+      GIT_BRANCH="${2:-}"
+      shift 2
+      ;;
+    --ref)
+      GIT_REF="${2:-}"
       shift 2
       ;;
     --install-vllm)
@@ -67,9 +79,40 @@ if [[ -z "${REPO_URL}" ]]; then
   exit 1
 fi
 
+sync_repo_ref() {
+  cd "${PROJECT_DIR}"
+
+  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+    echo "Remote harness repo has uncommitted changes: ${PROJECT_DIR}" >&2
+    echo "Refusing to update automatically. Clean or replace the remote repo first." >&2
+    exit 1
+  fi
+
+  git fetch --tags origin
+
+  if [[ -n "${GIT_BRANCH}" ]]; then
+    if git show-ref --verify --quiet "refs/heads/${GIT_BRANCH}"; then
+      git checkout "${GIT_BRANCH}"
+    else
+      git checkout -b "${GIT_BRANCH}" "origin/${GIT_BRANCH}"
+    fi
+    git pull --ff-only origin "${GIT_BRANCH}"
+  fi
+
+  if [[ -n "${GIT_REF}" ]]; then
+    if ! git rev-parse --verify "${GIT_REF}^{commit}" >/dev/null 2>&1; then
+      git fetch origin "${GIT_REF}"
+    fi
+    git checkout --detach "${GIT_REF}"
+  fi
+
+  echo "Remote harness repo ready at commit $(git rev-parse HEAD)."
+}
+
 ensure_repo() {
   if [[ -d "${PROJECT_DIR}/.git" ]]; then
-    echo "Remote harness repo already exists at ${PROJECT_DIR}."
+    echo "Remote harness repo already exists at ${PROJECT_DIR}; syncing requested git state."
+    sync_repo_ref
     return 0
   fi
 
@@ -81,13 +124,23 @@ ensure_repo() {
   if [[ ! -e "${PROJECT_DIR}" ]]; then
     mkdir -p "$(dirname "${PROJECT_DIR}")"
     echo "Fresh box detected. Cloning harness repo into ${PROJECT_DIR}."
-    git clone "${REPO_URL}" "${PROJECT_DIR}"
+    if [[ -n "${GIT_BRANCH}" ]]; then
+      git clone --branch "${GIT_BRANCH}" "${REPO_URL}" "${PROJECT_DIR}"
+    else
+      git clone "${REPO_URL}" "${PROJECT_DIR}"
+    fi
+    sync_repo_ref
     return 0
   fi
 
   if [[ -d "${PROJECT_DIR}" && -z "$(ls -A "${PROJECT_DIR}" 2>/dev/null)" ]]; then
     echo "Empty project directory detected. Cloning harness repo into ${PROJECT_DIR}."
-    git clone "${REPO_URL}" "${PROJECT_DIR}"
+    if [[ -n "${GIT_BRANCH}" ]]; then
+      git clone --branch "${GIT_BRANCH}" "${REPO_URL}" "${PROJECT_DIR}"
+    else
+      git clone "${REPO_URL}" "${PROJECT_DIR}"
+    fi
+    sync_repo_ref
     return 0
   fi
 

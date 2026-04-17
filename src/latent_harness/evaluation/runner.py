@@ -47,7 +47,27 @@ def _should_log_batch_progress(
 
 
 def _pretokenize_examples(runtime_config, tokenizer, examples: list[BenchmarkExample]) -> dict[str, Any]:
-    prompts = [example.prompt for example in examples]
+    use_chat = getattr(runtime_config, "use_chat_template", False)
+    chat_kw = getattr(runtime_config, "chat_template_kwargs", None) or {}
+    prompts: list[str] = []
+    for example in examples:
+        prompt = example.prompt
+        if use_chat and getattr(tokenizer, "chat_template", None):
+            messages = [{"role": "user", "content": prompt}]
+            try:
+                prompt = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    **chat_kw,
+                )
+            except TypeError:
+                prompt = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+        prompts.append(prompt)
     tokenized = tokenizer(
         prompts,
         return_tensors="pt",
@@ -93,6 +113,9 @@ def _generate_baseline(
         "do_sample": not greedy,
         "pad_token_id": tokenizer.pad_token_id,
     }
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    if eos_token_id is not None:
+        generation_kwargs["eos_token_id"] = eos_token_id
     if not greedy:
         generation_kwargs["temperature"] = temperature
         generation_kwargs["top_k"] = top_k

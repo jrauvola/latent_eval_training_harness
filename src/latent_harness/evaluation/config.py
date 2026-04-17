@@ -36,6 +36,15 @@ class EvaluationModelSpec:
     runtime: LatentRuntimeConfig
     inference_strategy: InferenceStrategy = "latent_cot"
     model_kind: ModelKind = "latent_runtime"
+    #: Used with ``checkpoint_type: hf_pretrained`` — snapshot lives at ``repo_id/subfolder/``.
+    hf_subfolder: str | None = None
+    #: Exact repo-relative path for ``checkpoint_type: hf_repo`` when the weight file is not
+    #: ``subfolder/{model.safetensors,pytorch_model.bin}`` (e.g. xet blob ``coconut/checkpoint_best``).
+    hf_hub_filename: str | None = None
+    #: Strip this prefix from checkpoint keys before ``load_state_dict`` (e.g. ``base_causallm.``).
+    hf_checkpoint_state_dict_prefix: str | None = None
+    #: Added via ``add_special_tokens`` before loading weights (e.g. COCONUT pause/latent tokens).
+    hf_extra_special_tokens: list[str] | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "EvaluationModelSpec":
@@ -55,6 +64,10 @@ class EvaluationModelSpec:
             runtime=LatentRuntimeConfig(**runtime_payload),
             inference_strategy=payload.get("inference_strategy", "latent_cot"),
             model_kind=payload.get("model_kind", "latent_runtime"),
+            hf_subfolder=payload.get("hf_subfolder"),
+            hf_hub_filename=payload.get("hf_hub_filename"),
+            hf_checkpoint_state_dict_prefix=payload.get("hf_checkpoint_state_dict_prefix"),
+            hf_extra_special_tokens=payload.get("hf_extra_special_tokens"),
         )
 
 

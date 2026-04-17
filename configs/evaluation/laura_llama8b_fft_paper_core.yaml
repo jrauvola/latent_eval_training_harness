@@ -1,0 +1,43 @@
+# Paper-core math + CSQA baselines for Laura's merged FFT COCONUT-style Llama 8B snapshot.
+# Hub: https://huggingface.co/LauraGG/latent-reasoning-llama8b-fft
+# (Weights are split per snapshot under subfolders; instruct59 includes chat_template.)
+#
+# Full benchmarks are large on an 8B model — adjust max_examples_per_benchmark or batch_size as needed.
+# Requires GPU (CUDA) with enough VRAM for bf16 ~8B + activations (device_map=auto when CUDA is available).
+
+runtime:
+  output_dir: artifacts/eval/laura_llama8b_fft_paper_core
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 1
+  progress_log_interval_batches: 5
+  max_examples_per_benchmark: 32
+  max_new_tokens: 256
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+benchmarks:
+  - gsm8k
+  - svamp
+  - gsm-hard
+  - multi-arith
+  - commonsense_qa
+
+models:
+  - name: laura_llama8b_fft_instruct59
+    checkpoint_source: LauraGG/latent-reasoning-llama8b-fft
+    checkpoint_type: hf_pretrained
+    hf_subfolder: coconut_instruct_59pct
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: LauraGG/latent-reasoning-llama8b-fft
+      use_lora: false
+    runtime:
+      model_max_length: 2048
+      num_latent: 0
+      use_prj: false
+      bf16: true

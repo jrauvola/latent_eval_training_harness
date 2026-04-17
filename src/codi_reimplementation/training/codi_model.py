@@ -10,11 +10,12 @@ from safetensors.torch import load_file as load_safetensors
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from codi_reimplementation.training.config import CodiModelConfig, CodiRuntimeConfig
+from latent_harness.core.config import resolve_hf_hub_token
 
 
 def get_lora_target_modules(model_name: str) -> list[str]:
     lowered = model_name.lower()
-    if any(name in lowered for name in ("llama", "mistral", "falcon", "qwen")):
+    if any(name in lowered for name in ("llama", "mistral", "falcon", "qwen", "gemma")):
         return ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"]
     if "phi" in lowered:
         return ["q_proj", "k_proj", "v_proj", "dense", "fc1", "fc2"]
@@ -27,6 +28,15 @@ def get_modules_to_save(model_name: str) -> list[str]:
     if "gpt2" in model_name.lower():
         return ["wte", "lm_head"]
     return ["embed_tokens", "lm_head"]
+
+
+def get_text_config_attr(config: Any, attr_name: str) -> Any:
+    if hasattr(config, attr_name):
+        return getattr(config, attr_name)
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None and hasattr(text_config, attr_name):
+        return getattr(text_config, attr_name)
+    raise AttributeError(f"Could not resolve config attribute {attr_name!r} on {type(config).__name__}")
 
 
 def load_checkpoint_state(checkpoint: str) -> dict[str, torch.Tensor]:
@@ -67,12 +77,13 @@ class CODIRuntime(nn.Module):
 
         self.codi = AutoModelForCausalLM.from_pretrained(
             model_config.base_model_name_or_path,
-            token=model_config.hf_token,
+            token=resolve_hf_hub_token(model_config.hf_token),
             torch_dtype=torch_dtype if model_config.full_precision else None,
             quantization_config=quantization_config,
         )
 
-        original_vocab_size = self.codi.config.vocab_size
+        hidden_size = get_text_config_attr(self.codi.config, "hidden_size")
+        original_vocab_size = get_text_config_attr(self.codi.config, "vocab_size")
         self.pad_token_id = original_vocab_size
         self.bot_id = original_vocab_size + 1
         self.eot_id = original_vocab_size + 2
@@ -95,12 +106,12 @@ class CODIRuntime(nn.Module):
         if self.use_prj:
             blocks: list[nn.Module] = [
                 nn.Dropout(runtime_config.prj_dropout),
-                nn.Linear(self.codi.config.hidden_size, runtime_config.prj_dim),
+                nn.Linear(hidden_size, runtime_config.prj_dim),
                 nn.GELU(),
-                nn.Linear(runtime_config.prj_dim, self.codi.config.hidden_size),
+                nn.Linear(runtime_config.prj_dim, hidden_size),
             ]
             if not runtime_config.prj_no_ln:
-                blocks.append(nn.LayerNorm(self.codi.config.hidden_size))
+                blocks.append(nn.LayerNorm(hidden_size))
             self.prj = nn.Sequential(*blocks).to(dtype=self.runtime_dtype)
         else:
             self.prj = nn.Identity()
@@ -116,7 +127,7 @@ class CODIRuntime(nn.Module):
     def build_tokenizer(self) -> AutoTokenizer:
         tokenizer = AutoTokenizer.from_pretrained(
             self.model_config.base_model_name_or_path,
-            token=self.model_config.hf_token,
+            token=resolve_hf_hub_token(self.model_config.hf_token),
             model_max_length=self.runtime_config.model_max_length,
             padding_side="left",
             use_fast=False,
@@ -133,6 +144,12 @@ class CODIRuntime(nn.Module):
             return base.gpt_neox.embed_in
         if "gpt2" in model_name:
             return base.transformer.wte
+        if hasattr(base, "model") and hasattr(base.model, "language_model"):
+            language_model = base.model.language_model
+            if hasattr(language_model, "embed_tokens"):
+                return language_model.embed_tokens
+            if hasattr(language_model, "model") and hasattr(language_model.model, "embed_tokens"):
+                return language_model.model.embed_tokens
         if hasattr(base, "model") and hasattr(base.model, "embed_tokens"):
             return base.model.embed_tokens
         if hasattr(base, "embed_tokens"):
@@ -142,6 +159,25 @@ class CODIRuntime(nn.Module):
     def maybe_project(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return self.prj(hidden_state) if self.use_prj else hidden_state
 
+    def needs_token_type_ids(self) -> bool:
+        model_name = self.model_config.base_model_name_or_path.lower()
+        return "gemma-3" in model_name or "gemma3" in model_name
+
+    def build_token_type_ids(
+        self,
+        *,
+        input_ids: torch.LongTensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.LongTensor | None:
+        if not self.needs_token_type_ids():
+            return None
+        if input_ids is not None:
+            return torch.zeros_like(input_ids, dtype=torch.long)
+        if inputs_embeds is not None:
+            batch_size, seq_len = inputs_embeds.shape[:2]
+            return torch.zeros((batch_size, seq_len), dtype=torch.long, device=inputs_embeds.device)
+        return None
+
     def encode_question(
         self,
         input_ids: torch.LongTensor,
@@ -150,6 +186,7 @@ class CODIRuntime(nn.Module):
         outputs = self.codi(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            token_type_ids=self.build_token_type_ids(input_ids=input_ids),
             use_cache=True,
             output_hidden_states=True,
         )
@@ -166,6 +203,7 @@ class CODIRuntime(nn.Module):
         for _ in range(num_steps):
             outputs = self.codi(
                 inputs_embeds=latent,
+                token_type_ids=self.build_token_type_ids(inputs_embeds=latent),
                 use_cache=True,
                 output_hidden_states=True,
                 past_key_values=past_key_values,
@@ -222,11 +260,12 @@ class CODIRuntime(nn.Module):
         for _ in range(max_new_tokens):
             outputs = self.codi(
                 inputs_embeds=next_embeds,
+                token_type_ids=self.build_token_type_ids(inputs_embeds=next_embeds),
                 use_cache=True,
                 past_key_values=past_key_values,
             )
             past_key_values = outputs.past_key_values
-            logits = outputs.logits[:, -1, : self.codi.config.vocab_size - 1]
+            logits = outputs.logits[:, -1, : self.eot_id]
             token_ids = self._sample_tokens(
                 logits=logits,
                 greedy=greedy,
@@ -311,11 +350,13 @@ class CODIRuntime(nn.Module):
             teacher_outputs = self.codi(
                 input_ids=ref_input_ids,
                 attention_mask=ref_attention_mask,
+                token_type_ids=self.build_token_type_ids(input_ids=ref_input_ids),
                 output_hidden_states=True,
             )
         teacher_outputs_with_grad = self.codi(
             input_ids=ref_input_ids,
             attention_mask=ref_attention_mask,
+            token_type_ids=self.build_token_type_ids(input_ids=ref_input_ids),
             output_hidden_states=True,
         )
 
@@ -326,6 +367,7 @@ class CODIRuntime(nn.Module):
         for latent_index in range(self.runtime_config.num_latent):
             latent_outputs = self.codi(
                 inputs_embeds=latent,
+                token_type_ids=self.build_token_type_ids(inputs_embeds=latent),
                 use_cache=True,
                 output_hidden_states=True,
                 past_key_values=past_key_values,
@@ -340,6 +382,7 @@ class CODIRuntime(nn.Module):
             decoder_embeds = self.get_input_embedding_layer()(decoder_input_ids)
             student_outputs = self.codi(
                 inputs_embeds=decoder_embeds,
+                token_type_ids=self.build_token_type_ids(inputs_embeds=decoder_embeds),
                 use_cache=True,
                 output_hidden_states=True,
                 past_key_values=past_key_values,

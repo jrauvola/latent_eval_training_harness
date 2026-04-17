@@ -1,0 +1,47 @@
+# COCONUT curriculum checkpoint (GPT-2 small) from
+# [bmarti44/coconut-curriculum-checkpoints](https://huggingface.co/bmarti44/coconut-curriculum-checkpoints).
+#
+# On the Hub, `coconut/checkpoint_best` is a single ~806MB `torch.save` blob (not
+# `pytorch_model.bin` inside a subfolder). Use `hf_hub_filename` to point at it.
+# Weights use the `base_causallm.*` prefix; special tokens follow the paper repo README.
+#
+# First run downloads the checkpoint; keep `max_examples_per_benchmark` tiny for smoke.
+#
+#   latent-eval --config configs/evaluation/bmarti44_coconut_gpt2_best_smoke.yaml
+
+runtime:
+  output_dir: artifacts/eval/bmarti44_coconut_gpt2_best_smoke
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 1
+  max_examples_per_benchmark: 2
+  max_new_tokens: 64
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+benchmarks:
+  - multi-arith
+
+models:
+  - name: coconut_bmarti44_gpt2_checkpoint_best
+    checkpoint_source: bmarti44/coconut-curriculum-checkpoints
+    checkpoint_type: hf_repo
+    hf_hub_filename: coconut/checkpoint_best
+    hf_checkpoint_state_dict_prefix: base_causallm
+    hf_extra_special_tokens:
+      - "<|start-latent|>"
+      - "<|end-latent|>"
+      - "<|latent|>"
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: openai-community/gpt2
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: false

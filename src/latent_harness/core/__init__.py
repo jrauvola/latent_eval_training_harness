@@ -5,7 +5,7 @@ from latent_harness.core.checkpoints import (
     remap_runtime_state_dict_prefixes,
     resolve_checkpoint_path,
 )
-from latent_harness.core.config import LatentRuntimeConfig, ModelConfig
+from latent_harness.core.config import LatentRuntimeConfig, ModelConfig, resolve_hf_hub_token
 from latent_harness.core.io import dump_yamlable, ensure_dir, load_yaml_config, resolve_from_config
 from latent_harness.core.runtime import LatentReasoningRuntime
 
@@ -13,6 +13,7 @@ __all__ = [
     "LatentReasoningRuntime",
     "LatentRuntimeConfig",
     "ModelConfig",
+    "resolve_hf_hub_token",
     "dump_yamlable",
     "ensure_dir",
     "load_checkpoint_state",

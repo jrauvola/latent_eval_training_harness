@@ -1,0 +1,35 @@
+runtime:
+  output_dir: artifacts/eval/paper_core_meta_llama31_8b_raw_gh200_v5
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 1
+  progress_log_interval_batches: 5
+  max_examples_per_benchmark: 32
+  max_new_tokens: 128
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+benchmarks:
+  - gsm8k
+  - svamp
+  - gsm-hard
+  - multi-arith
+  - commonsense_qa
+
+models:
+  - name: base_meta_llama31_8b
+    checkpoint_source:
+    checkpoint_type: base_model
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: meta-llama/Llama-3.1-8B
+      use_lora: false
+    runtime:
+      model_max_length: 2048
+      num_latent: 0
+      use_prj: false
+      bf16: true

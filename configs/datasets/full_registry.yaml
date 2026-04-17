@@ -1,0 +1,309 @@
+# Canonical Hugging Face (and load) parameters for latent-reasoning data mixes.
+# Smoke-test: `latent-smoke-datasets` (from repo root with harness on PYTHONPATH or editable install).
+
+version: 1
+
+entries:
+  # --- latent_train_core ---
+  - id: numinamath_15
+    category: latent_train_core
+    path: AI-MO/NuminaMath-1.5
+    subset: null
+    smoke_split: train[:1]
+
+  - id: openthoughts3_12m
+    category: latent_train_core
+    path: open-thoughts/OpenThoughts3-1.2M
+    subset: null
+    smoke_split: train[:1]
+    # Many parquet shards; first smoke can take a long time — use --include-heavy.
+    heavy_smoke: true
+
+  - id: gsm8k_aug_nl
+    category: latent_train_core
+    path: zen-E/GSM8k-Aug-NL
+    subset: null
+    smoke_split: train[:1]
+
+  # --- latent_train_breadth ---
+  - id: commonsense_cot_qingyi
+    category: latent_train_breadth
+    path: QingyiLee/CommonsenseQA-CoT
+    subset: null
+    smoke_split: train[:1]
+    fallbacks:
+      - path: zen-E/CommonsenseQA-GPT4omini
+        subset: null
+        smoke_split: train[:1]
+
+  - id: strategyqa_cot
+    category: latent_train_breadth
+    path: ChilleD/StrategyQA
+    subset: null
+    smoke_split: train[:1]
+
+  - id: natural_reasoning
+    category: latent_train_breadth
+    path: facebook/natural_reasoning
+    subset: null
+    smoke_split: train[:1]
+
+  - id: prontoqa
+    category: latent_train_breadth
+    path: longface/prontoqa-train
+    subset: null
+    # Streaming builder does not accept train[:1] on this repo.
+    smoke_split: train
+    fallbacks:
+      - path: tasksource/prontoqa
+        subset: null
+        smoke_split: train
+
+  - id: proofwriter
+    category: latent_train_breadth
+    path: tasksource/ProofWriter
+    subset: null
+    smoke_split: train[:1]
+
+  - id: ruletaker
+    category: latent_train_breadth
+    path: tasksource/ruletaker
+    subset: null
+    smoke_split: train
+
+  - id: folio
+    category: latent_train_breadth
+    path: yale-nlp/FOLIO
+    subset: null
+    smoke_split: train[:1]
+    # Hub gated; accept terms at the dataset page, then smoke with --include-gated.
+    gated: true
+
+  # --- latent_train_breadth_adapters_needed ---
+  - id: arc_challenge
+    category: latent_train_breadth_adapters_needed
+    path: allenai/ai2_arc
+    subset: ARC-Challenge
+    smoke_split: train[:1]
+
+  - id: openbookqa
+    category: latent_train_breadth_adapters_needed
+    path: allenai/openbookqa
+    subset: main
+    smoke_split: train[:1]
+
+  - id: hotpotqa_distractor
+    category: latent_train_breadth_adapters_needed
+    path: hotpot_qa
+    subset: distractor
+    smoke_split: validation[:1]
+
+  - id: musique
+    category: latent_train_breadth_adapters_needed
+    path: StonyBrookNLP/musique
+    subset: null
+    smoke_split: train[:1]
+    fallbacks:
+      # Community mirror; voidful/MuSiQue can fail Arrow JSON schema merge on some splits.
+      - path: dgslibisey/MuSiQue
+        subset: null
+        smoke_split: train
+
+  - id: tabmwp
+    category: latent_train_breadth_adapters_needed
+    path: JiaerX/TabMWP
+    subset: null
+    smoke_split: train
+    fallbacks:
+      - path: lupante/TabMWP
+        subset: null
+        smoke_split: train
+
+  - id: finqa
+    category: latent_train_breadth_adapters_needed
+    path: snorkelai/finqa-data
+    subset: null
+    smoke_split: test
+    fallbacks:
+      - path: The-FinAI/finqa
+        subset: null
+        smoke_split: train
+
+  - id: tat_qa
+    category: latent_train_breadth_adapters_needed
+    path: ChanceFocus/flare-tatqa
+    subset: null
+    smoke_split: test
+    fallbacks:
+      - path: next-tat/TAT-QA
+        subset: null
+        smoke_split: train
+
+  # --- retention_sft ---
+  - id: tulu_v2_sft_mixture
+    category: retention_sft
+    path: allenai/tulu-v2-sft-mixture
+    subset: null
+    smoke_split: train[:1]
+
+  - id: oasst2
+    category: retention_sft
+    path: OpenAssistant/oasst2
+    subset: null
+    smoke_split: train[:1]
+
+  - id: natural_instructions
+    category: retention_sft
+    path: allenai/natural_instructions
+    subset: null
+    smoke_split: train[:1]
+
+  - id: natural_questions
+    category: retention_sft
+    path: google-research-datasets/natural_questions
+    subset: default
+    smoke_split: train[:1]
+
+  - id: trivia_qa
+    category: retention_sft
+    path: mandarjoshi/trivia_qa
+    subset: unfiltered.nocontext
+    smoke_split: train[:1]
+
+  - id: squad
+    category: retention_sft
+    path: rajpurkar/squad
+    subset: null
+    smoke_split: train[:1]
+
+  - id: cnn_dailymail
+    category: retention_sft
+    path: abisee/cnn_dailymail
+    subset: "3.0.0"
+    smoke_split: train[:1]
+
+  - id: xsum
+    category: retention_sft
+    path: EdinburghNLP/xsum
+    subset: null
+    smoke_split: train[:1]
+
+  - id: samsum
+    category: retention_sft
+    path: samsum
+    subset: null
+    smoke_split: train[:1]
+
+  - id: dialogsum
+    category: retention_sft
+    path: knkarthick/dialogsum
+    subset: null
+    smoke_split: train[:1]
+
+  # --- retention_pretraining ---
+  - id: fineweb_edu
+    category: retention_pretraining
+    path: HuggingFaceFW/fineweb-edu
+    subset: null
+    smoke_split: train[:1]
+    heavy_smoke: true
+
+  # --- process_supervision_aux ---
+  - id: pathfinder_600k
+    category: process_supervision_aux
+    path: declare-lab/PathFinder-600K
+    subset: null
+    smoke_split: train[:1]
+
+  - id: prm800k
+    category: process_supervision_aux
+    path: tasksource/PRM800K
+    subset: null
+    smoke_split: train[:1]
+
+  - id: sharp_math_step
+    category: process_supervision_aux
+    path: Lofftavelglarn/SHARP-Math-Step
+    subset: null
+    smoke_split: train[:1]
+
+  - id: math_reasoning_paths
+    category: process_supervision_aux
+    path: WNJXYK/MATH-Reasoning-Paths
+    subset: null
+    smoke_split: train[:1]
+
+  - id: aime_reasoning_paths
+    category: process_supervision_aux
+    path: WNJXYK/AIME_1983_2024-Reasoning-Paths
+    subset: null
+    smoke_split: train[:1]
+
+  # --- eval_final (unique loads; overlaps reuse ids above where noted) ---
+  - id: eval_gsm8k
+    category: eval_final
+    path: openai/gsm8k
+    subset: main
+    smoke_split: test[:1]
+
+  - id: eval_math_500
+    category: eval_final
+    path: HuggingFaceH4/MATH-500
+    subset: null
+    smoke_split: test[:1]
+
+  - id: eval_strategyqa_tau
+    category: eval_final
+    path: tau/strategyqa
+    subset: null
+    smoke_split: test[:1]
+    fallbacks:
+      - path: ChilleD/StrategyQA
+        subset: null
+        smoke_split: test[:1]
+
+  - id: eval_arc_challenge
+    category: eval_final
+    path: allenai/ai2_arc
+    subset: ARC-Challenge
+    smoke_split: test[:1]
+
+  - id: eval_hotpotqa
+    category: eval_final
+    path: hotpot_qa
+    subset: distractor
+    smoke_split: validation[:1]
+
+  - id: eval_musique
+    category: eval_final
+    path: StonyBrookNLP/musique
+    subset: null
+    smoke_split: train[:1]
+    fallbacks:
+      - path: dgslibisey/MuSiQue
+        subset: null
+        smoke_split: train
+
+  - id: eval_mmlu
+    category: eval_final
+    path: cais/mmlu
+    subset: abstract_algebra
+    smoke_split: test[:1]
+
+  - id: eval_mmlu_pro
+    category: eval_final
+    path: TIGER-Lab/MMLU-Pro
+    subset: null
+    smoke_split: test[:1]
+
+  - id: eval_ifeval
+    category: eval_final
+    path: google/IFEval
+    subset: null
+    smoke_split: train[:1]
+
+  - id: eval_uq
+    category: eval_final
+    path: uq-project/uq
+    subset: null
+    smoke_split: test[:1]

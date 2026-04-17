@@ -8,6 +8,7 @@ from huggingface_hub import hf_hub_download
 
 from codi_reimplementation.training.codi_model import CODIRuntime, load_checkpoint_state
 from codi_reimplementation.training.config import CodiModelConfig, CodiRuntimeConfig
+from latent_harness.core.config import resolve_hf_hub_token
 
 
 @dataclass(slots=True)
@@ -46,13 +47,13 @@ def _resolve_checkpoint_path(spec: EvalModelSpec) -> str:
             return hf_hub_download(
                 repo_id=spec.checkpoint_source,
                 filename=filename,
-                token=spec.hf_token,
+                token=resolve_hf_hub_token(spec.hf_token),
             )
         except Exception:
             return hf_hub_download(
                 repo_id=spec.checkpoint_source,
                 filename="pytorch_model.bin",
-                token=spec.hf_token,
+                token=resolve_hf_hub_token(spec.hf_token),
             )
     source = Path(spec.checkpoint_source).expanduser().resolve()
     if source.is_file():
@@ -68,7 +69,7 @@ def load_eval_model(spec: EvalModelSpec, device: str | torch.device | None = Non
     runtime = CODIRuntime(
         model_config=CodiModelConfig(
             base_model_name_or_path=spec.base_model_name_or_path,
-            hf_token=spec.hf_token,
+            hf_token=resolve_hf_hub_token(spec.hf_token),
             lora_r=spec.lora_r,
             lora_alpha=spec.lora_alpha,
             lora_dropout=spec.lora_dropout,

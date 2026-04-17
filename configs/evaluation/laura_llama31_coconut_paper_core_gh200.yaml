@@ -1,0 +1,105 @@
+runtime:
+  output_dir: artifacts/eval/laura_qwen_gemma_coconut_paper_core_gh200_v3
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 1
+  progress_log_interval_batches: 5
+  max_examples_per_benchmark: 32
+  max_new_tokens: 128
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+benchmarks:
+  - gsm8k
+  - svamp
+  - gsm-hard
+  - multi-arith
+  - commonsense_qa
+
+models:
+  - name: laura_llama8b_fft_instruct59
+    checkpoint_source: LauraGG/latent-reasoning-llama8b-fft
+    checkpoint_type: hf_pretrained
+    hf_subfolder: coconut_instruct_59pct
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: LauraGG/latent-reasoning-llama8b-fft
+      use_lora: false
+    runtime:
+      model_max_length: 2048
+      num_latent: 0
+      use_prj: false
+      bf16: true
+
+  - name: base_qwen3_8b
+    checkpoint_source:
+    checkpoint_type: base_model
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: Qwen/Qwen3-8B
+      use_lora: false
+    runtime:
+      model_max_length: 2048
+      num_latent: 0
+      use_prj: false
+      bf16: true
+      # Qwen3 expects chat formatting; greedy + default thinking hurts math (see HF readme).
+      use_chat_template: true
+      chat_template_kwargs:
+        enable_thinking: false
+
+  - name: coconut_bmarti44_gpt2_checkpoint_best
+    checkpoint_source: bmarti44/coconut-curriculum-checkpoints
+    checkpoint_type: hf_repo
+    hf_hub_filename: coconut/checkpoint_best
+    hf_checkpoint_state_dict_prefix: base_causallm
+    hf_extra_special_tokens:
+      - "<|start-latent|>"
+      - "<|end-latent|>"
+      - "<|latent|>"
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: openai-community/gpt2
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: false
+
+  - name: base_gemma3_4b_it
+    checkpoint_source:
+    checkpoint_type: base_model
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: google/gemma-3-4b-it
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: true
+
+  - name: base_qwen3_4b_instruct
+    checkpoint_source:
+    checkpoint_type: base_model
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: true
+      use_chat_template: true
+      chat_template_kwargs:
+        enable_thinking: false

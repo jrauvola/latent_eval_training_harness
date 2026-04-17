@@ -5,7 +5,13 @@ from dataclasses import dataclass
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 
-from latent_harness.core import LatentReasoningRuntime, load_checkpoint_state, remap_runtime_state_dict_prefixes, resolve_checkpoint_path
+from latent_harness.core import (
+    LatentReasoningRuntime,
+    load_checkpoint_state,
+    remap_runtime_state_dict_prefixes,
+    resolve_checkpoint_path,
+    resolve_hf_hub_token,
+)
 from latent_harness.evaluation.config import EvaluationModelSpec
 
 
@@ -22,10 +28,20 @@ class EvaluationModelHandle:
     remove_eos: bool = True
 
 
+def _add_eval_special_tokens(tokenizer: PreTrainedTokenizerBase, spec: EvaluationModelSpec) -> None:
+    if spec.hf_extra_special_tokens:
+        tokenizer.add_special_tokens({"additional_special_tokens": list(spec.hf_extra_special_tokens)})
+
+
+def _strip_hf_checkpoint_prefix(state_dict: dict[str, torch.Tensor], prefix: str) -> dict[str, torch.Tensor]:
+    p = prefix if prefix.endswith(".") else f"{prefix}."
+    return {k[len(p) :]: v for k, v in state_dict.items() if k.startswith(p)}
+
+
 def _build_standard_tokenizer(spec: EvaluationModelSpec) -> PreTrainedTokenizerBase:
     tokenizer = AutoTokenizer.from_pretrained(
         spec.model.base_model_name_or_path,
-        token=spec.model.hf_token,
+        token=resolve_hf_hub_token(spec.model.hf_token),
         model_max_length=spec.runtime.model_max_length,
         padding_side="left",
         use_fast=False,
@@ -35,7 +51,24 @@ def _build_standard_tokenizer(spec: EvaluationModelSpec) -> PreTrainedTokenizerB
             tokenizer.pad_token = tokenizer.eos_token
         else:
             tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+    _add_eval_special_tokens(tokenizer, spec)
     return tokenizer
+
+
+def _resolve_vocab_size(model: object) -> int | None:
+    config = getattr(model, "config", None)
+    vocab_size = getattr(config, "vocab_size", None)
+    if isinstance(vocab_size, int):
+        return vocab_size
+    text_config = getattr(config, "text_config", None)
+    vocab_size = getattr(text_config, "vocab_size", None)
+    if isinstance(vocab_size, int):
+        return vocab_size
+    embeddings = model.get_input_embeddings()
+    num_embeddings = getattr(embeddings, "num_embeddings", None)
+    if isinstance(num_embeddings, int):
+        return num_embeddings
+    return None
 
 
 def _load_latent_runtime_model(
@@ -53,7 +86,9 @@ def _load_latent_runtime_model(
             resolve_checkpoint_path(
                 spec.checkpoint_source,
                 spec.checkpoint_type,
-                token=spec.model.hf_token,
+                token=resolve_hf_hub_token(spec.model.hf_token),
+                subfolder=spec.hf_subfolder,
+                hf_hub_filename=spec.hf_hub_filename,
             )
         )
         state_dict = remap_runtime_state_dict_prefixes(
@@ -89,6 +124,52 @@ def _load_standard_generation_model(
     *,
     device: str | torch.device | None = None,
 ) -> EvaluationModelHandle:
+    if spec.checkpoint_type == "hf_pretrained":
+        if not spec.checkpoint_source:
+            raise ValueError("checkpoint_type 'hf_pretrained' requires checkpoint_source (HF repo id)")
+        if torch.cuda.is_available():
+            torch_dtype = torch.bfloat16 if spec.runtime.bf16 else torch.float16
+        else:
+            torch_dtype = torch.float32
+        tokenizer = AutoTokenizer.from_pretrained(
+            spec.checkpoint_source,
+            subfolder=spec.hf_subfolder,
+            token=resolve_hf_hub_token(spec.model.hf_token),
+            model_max_length=spec.runtime.model_max_length,
+            padding_side="left",
+            use_fast=False,
+        )
+        if tokenizer.pad_token_id is None:
+            if tokenizer.eos_token is not None:
+                tokenizer.pad_token = tokenizer.eos_token
+            else:
+                tokenizer.add_special_tokens({"pad_token": ""})
+        _add_eval_special_tokens(tokenizer, spec)
+        load_kw: dict = {
+            "token": resolve_hf_hub_token(spec.model.hf_token),
+            "torch_dtype": torch_dtype if spec.model.full_precision else None,
+            "low_cpu_mem_usage": True,
+        }
+        if torch.cuda.is_available():
+            load_kw["device_map"] = "auto"
+        model = AutoModelForCausalLM.from_pretrained(
+            spec.checkpoint_source,
+            subfolder=spec.hf_subfolder,
+            **load_kw,
+        )
+        if device is not None and getattr(model, "hf_device_map", None) is None:
+            model = model.to(device)
+        model.eval()
+        return EvaluationModelHandle(
+            name=spec.name,
+            model_kind=spec.model_kind,
+            inference_strategy=spec.inference_strategy,
+            runtime_config=spec.runtime,
+            model=model,
+            generation_model=model,
+            tokenizer=tokenizer,
+        )
+
     tokenizer = _build_standard_tokenizer(spec)
     if torch.cuda.is_available():
         torch_dtype = torch.bfloat16 if spec.runtime.bf16 else torch.float16
@@ -96,19 +177,24 @@ def _load_standard_generation_model(
         torch_dtype = torch.float32
     model = AutoModelForCausalLM.from_pretrained(
         spec.model.base_model_name_or_path,
-        token=spec.model.hf_token,
+        token=resolve_hf_hub_token(spec.model.hf_token),
         torch_dtype=torch_dtype if spec.model.full_precision else None,
     )
-    if len(tokenizer) > model.config.vocab_size:
+    vocab_size = _resolve_vocab_size(model)
+    if vocab_size is not None and len(tokenizer) > vocab_size:
         model.resize_token_embeddings(len(tokenizer))
     if spec.checkpoint_type not in {"base_model", "none"}:
         state_dict = load_checkpoint_state(
             resolve_checkpoint_path(
                 spec.checkpoint_source,
                 spec.checkpoint_type,
-                token=spec.model.hf_token,
+                token=resolve_hf_hub_token(spec.model.hf_token),
+                subfolder=spec.hf_subfolder,
+                hf_hub_filename=spec.hf_hub_filename,
             )
         )
+        if spec.hf_checkpoint_state_dict_prefix:
+            state_dict = _strip_hf_checkpoint_prefix(state_dict, spec.hf_checkpoint_state_dict_prefix)
         model.load_state_dict(state_dict, strict=False)
     if device is not None:
         model = model.to(device)

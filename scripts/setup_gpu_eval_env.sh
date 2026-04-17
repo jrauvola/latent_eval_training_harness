@@ -22,7 +22,14 @@ python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 
 python -m pip install --upgrade pip
+
+if [[ "$(uname -m)" == "aarch64" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+  # ARM GPU boxes like GH200 need the CUDA wheel index; plain PyPI resolves torch+cpu.
+  python -m pip install --upgrade --index-url https://download.pytorch.org/whl/cu128 torch
+fi
+
 python -m pip install -e ".[dev]"
+python -m pip install protobuf sentencepiece
 
 # bitsandbytes is optional in the harness, but useful on GPU boxes when using
 # 4-bit loading paths.

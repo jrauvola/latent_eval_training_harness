@@ -50,14 +50,23 @@ def resolve_checkpoint_path(
     checkpoint_type: str = "hf_repo",
     *,
     token: str | None = None,
+    subfolder: str | None = None,
+    hf_hub_filename: str | None = None,
 ) -> str:
     if checkpoint_type == "hf_repo":
+        if hf_hub_filename:
+            return hf_hub_download(
+                repo_id=str(checkpoint_source),
+                filename=hf_hub_filename,
+                token=token,
+            )
         for filename in ("model.safetensors", "pytorch_model.bin"):
             try:
                 return hf_hub_download(
                     repo_id=str(checkpoint_source),
                     filename=filename,
                     token=token,
+                    subfolder=subfolder,
                 )
             except Exception:
                 continue

@@ -1,0 +1,53 @@
+runtime:
+  output_dir: artifacts/eval/paper_core_remaining_gh200_v4
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 1
+  progress_log_interval_batches: 5
+  max_examples_per_benchmark: 32
+  max_new_tokens: 128
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+benchmarks:
+  - gsm8k
+  - svamp
+  - gsm-hard
+  - multi-arith
+  - commonsense_qa
+
+models:
+  - name: base_gemma3_4b_it
+    checkpoint_source:
+    checkpoint_type: base_model
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: google/gemma-3-4b-it
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: true
+      use_chat_template: true
+
+  - name: base_qwen3_4b_instruct
+    checkpoint_source:
+    checkpoint_type: base_model
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: true
+      use_chat_template: true
+      chat_template_kwargs:
+        enable_thinking: false

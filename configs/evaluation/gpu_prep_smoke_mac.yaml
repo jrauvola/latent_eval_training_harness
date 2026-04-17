@@ -1,0 +1,117 @@
+# Same as `gpu_prep_smoke.yaml` but **without** Laura 8B (~16GB+), for laptop / Apple
+# Silicon sanity checks. Full matrix with Laura: `gpu_prep_smoke.yaml`.
+#
+# Usage:
+#   export HF_TOKEN=...   # Llama + Gemma gates
+#   bash scripts/run_gpu_prep_smoke_mac.sh
+#
+# Or: CONFIG=configs/evaluation/gpu_prep_smoke_mac.yaml bash scripts/run_gpu_prep_smoke.sh
+
+runtime:
+  output_dir: artifacts/eval/gpu_prep_smoke_mac
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 1
+  progress_log_interval_batches: 1
+  max_examples_per_benchmark: 2
+  max_new_tokens: 64
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+benchmarks:
+  - multi-arith
+  - gsm8k
+  - p3_arc_challenge_letter
+
+models:
+  - name: base_gpt2
+    checkpoint_source:
+    checkpoint_type: base_model
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: gpt2
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: false
+  - name: codi_gpt2_official
+    checkpoint_source: zen-E/CODI-gpt2
+    checkpoint_type: hf_repo
+    model_kind: latent_runtime
+    inference_strategy: latent_cot
+    model:
+      base_model_name_or_path: gpt2
+      lora_r: 128
+      lora_alpha: 32
+      use_lora: true
+    runtime:
+      model_max_length: 512
+      num_latent: 6
+      use_prj: true
+      prj_dim: 768
+      prj_dropout: 0.0
+      remove_eos: true
+      bf16: false
+  - name: base_llama32_1b_instruct
+    checkpoint_source:
+    checkpoint_type: base_model
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: meta-llama/Llama-3.2-1B-Instruct
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: false
+  - name: codi_llama32_1b_official
+    checkpoint_source: zen-E/CODI-llama3.2-1b-Instruct
+    checkpoint_type: hf_repo
+    model_kind: latent_runtime
+    inference_strategy: latent_cot
+    model:
+      base_model_name_or_path: meta-llama/Llama-3.2-1B-Instruct
+      lora_r: 128
+      lora_alpha: 32
+      use_lora: true
+    runtime:
+      model_max_length: 512
+      num_latent: 6
+      use_prj: true
+      prj_dim: 2048
+      prj_dropout: 0.0
+      remove_eos: true
+      bf16: false
+  - name: base_gemma3_4b_it
+    checkpoint_source:
+    checkpoint_type: base_model
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: google/gemma-3-4b-it
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: false
+  - name: base_qwen3_4b_instruct
+    checkpoint_source:
+    checkpoint_type: base_model
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+      use_lora: false
+    runtime:
+      model_max_length: 512
+      num_latent: 0
+      use_prj: false
+      bf16: false

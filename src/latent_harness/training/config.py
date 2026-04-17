@@ -17,13 +17,18 @@ def _filter_supported_training_args(trainer_payload: dict[str, Any]) -> dict[str
 
 @dataclass(slots=True)
 class TrainingDataConfig:
-    dataset_names: list[str]
+    dataset_names: list[str] = field(default_factory=list)
+    registry_ids: list[str] = field(default_factory=list)
+    registry_path: str | None = None
     cache_dir: str = ".cache/huggingface"
     max_samples: int | None = None
+    max_samples_per_dataset: int | None = None
     snapshot_dir: str | None = None
     include_last_cot: bool = False
     answer_only: bool = False
     max_token_num: int = 1000
+    validation_split_ratio: float = 0.0
+    validation_max_samples: int | None = None
 
 
 @dataclass(slots=True)

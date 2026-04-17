@@ -57,6 +57,29 @@ def load_env_file(path: Path) -> dict[str, str]:
     return env
 
 
+def normalize_hf_env(env: dict[str, str]) -> dict[str, str]:
+    token = env.get("HUGGINGFACE_TOKEN") or env.get("HF_TOKEN") or env.get("HUGGING_FACE_HUB_TOKEN")
+    if token:
+        env.setdefault("HUGGINGFACE_TOKEN", token)
+        env.setdefault("HF_TOKEN", token)
+        env.setdefault("HUGGING_FACE_HUB_TOKEN", token)
+    return env
+
+
+def prepend_pythonpath(env: dict[str, str], path: Path) -> dict[str, str]:
+    existing = env.get("PYTHONPATH", "")
+    path_str = str(path)
+    env["PYTHONPATH"] = f"{path_str}:{existing}" if existing else path_str
+    return env
+
+
+def merge_env_values(env: dict[str, str], updates: dict[str, str]) -> dict[str, str]:
+    for key, value in updates.items():
+        if value or key not in env:
+            env[key] = value
+    return env
+
+
 def infer_org(model_id: str) -> str:
     if "/" in model_id:
         return model_id.split("/", 1)[0]
@@ -136,6 +159,9 @@ def build_seed(
             "modality": rollout.get("modality", "conversation"),
             "max_turns": rollout.get("max_turns", 2),
             "max_tokens": rollout.get("max_tokens", 1200),
+            "temperature": rollout.get("temperature"),
+            "evaluator_reasoning_effort": rollout.get("evaluator_reasoning_effort"),
+            "target_reasoning_effort": rollout.get("target_reasoning_effort"),
             "no_user_mode": rollout.get("no_user_mode", False),
             "selected_variations": rollout.get("selected_variations"),
             "num_reps": rollout.get("num_reps", 2),
@@ -416,7 +442,9 @@ def main() -> int:
     default_bloom_python = harness_root / ".venv-bloom/bin/python"
     if not default_bloom_python.exists():
         default_bloom_python = bloom_root / ".venv-bloom/bin/python"
-    bloom_python = Path(suite.get("bloom_python", default_bloom_python)).resolve()
+    # Keep the venv launcher path intact; resolving symlinks can collapse it to the
+    # system interpreter and drop access to the Bloom virtualenv packages.
+    bloom_python = Path(suite.get("bloom_python", default_bloom_python)).expanduser()
     base_config_dir = bloom_root / "bloom-data"
 
     if not bloom_python.exists():
@@ -450,8 +478,12 @@ def main() -> int:
     logs_root = harness_root / "artifacts/bloom/logs" / suite_name
 
     base_env = dict(os.environ)
-    base_env.update(load_env_file(harness_root / ".env"))
-    base_env.update(load_env_file(bloom_root / ".env"))
+    merge_env_values(base_env, load_env_file(harness_root / ".env"))
+    merge_env_values(base_env, load_env_file(bloom_root / ".env"))
+    normalize_hf_env(base_env)
+    bloom_src = bloom_root / "src"
+    if bloom_src.exists():
+        prepend_pythonpath(base_env, bloom_src)
 
     summary_rows: list[dict[str, Any]] = []
     failures: list[str] = []

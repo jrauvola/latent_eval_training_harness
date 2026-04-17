@@ -35,6 +35,7 @@ dev = [
 [project.scripts]
 latent-eval = "latent_harness.evaluation.cli:main"
 latent-train = "latent_harness.training.cli:main"
+latent-smoke-datasets = "latent_harness.data.smoke_datasets:main"
 codi-eval = "latent_harness.evaluation.cli:main"
 codi-train = "latent_harness.training.cli:main"
 latent-serve-openai = "latent_harness.serving.cli:main"
