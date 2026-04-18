@@ -53,3 +53,90 @@ def test_register_dgrad_probe_captures_per_layer_max(tmp_path):
     assert "0,l0," in csv_content
     assert "0,l1," in csv_content
     assert "0,l2," in csv_content
+
+
+def test_dgrad_probe_captures_known_analytical_value(tmp_path):
+    """Loss = out.sum() → grad_output for last layer is all-ones → max should be 1.0."""
+    from latent_harness.core.probes import DgradProbe
+
+    layer = torch.nn.Linear(8, 8)
+    probe = DgradProbe(output_path=tmp_path / "dgrad.csv")
+    probe.attach([layer], layer_names=["l0"])
+    x = torch.randn(2, 8, requires_grad=True)
+    out = layer(x)
+    loss = out.sum()
+    loss.backward()
+    probe.flush(step=0)
+    probe.detach_all()
+
+    import csv as _csv
+    with (tmp_path / "dgrad.csv").open() as f:
+        rows = list(_csv.DictReader(f))
+    # grad_output for the layer output is dloss/dout = all-ones tensor → max|.|=1.0
+    assert abs(float(rows[0]["max_abs_dgrad"]) - 1.0) < 1e-5
+
+
+def test_dgrad_probe_takes_running_max_across_multiple_backwards(tmp_path):
+    """CODI performs multiple forward/backward passes per training step.
+    Probe must take the max across all backwards within a single flush window.
+    """
+    from latent_harness.core.probes import DgradProbe
+
+    layer = torch.nn.Linear(4, 4)
+    probe = DgradProbe(output_path=tmp_path / "dgrad.csv")
+    probe.attach([layer], layer_names=["l0"])
+
+    # First backward: loss.sum() * 1.0 scale → max|grad_output| = 1.0
+    x1 = torch.randn(2, 4, requires_grad=True)
+    (layer(x1).sum()).backward()
+
+    # Second backward: loss.sum() * 5.0 scale → max|grad_output| = 5.0
+    x2 = torch.randn(2, 4, requires_grad=True)
+    (layer(x2).sum() * 5.0).backward()
+
+    probe.flush(step=0)
+    probe.detach_all()
+
+    import csv as _csv
+    with (tmp_path / "dgrad.csv").open() as f:
+        rows = list(_csv.DictReader(f))
+    captured = float(rows[0]["max_abs_dgrad"])
+    # Should be 5.0 (running max), not 1.0 (first) or overwritten by last
+    assert abs(captured - 5.0) < 1e-5, f"expected running max 5.0, got {captured}"
+
+
+def test_dgrad_probe_detach_stops_hook_firing(tmp_path):
+    """After detach_all, further forward/backward must not update state."""
+    from latent_harness.core.probes import DgradProbe
+
+    layer = torch.nn.Linear(4, 4)
+    probe = DgradProbe(output_path=tmp_path / "dgrad.csv")
+    probe.attach([layer], layer_names=["l0"])
+
+    # First pass — probe active
+    (layer(torch.randn(2, 4, requires_grad=True)).sum()).backward()
+    probe.flush(step=0)
+    probe.detach_all()
+
+    # Second pass — probe detached, should NOT appear in the CSV
+    (layer(torch.randn(2, 4, requires_grad=True) * 100).sum()).backward()
+    probe.flush(step=1)  # will write NaN (no hook data collected)
+
+    import csv as _csv
+    with (tmp_path / "dgrad.csv").open() as f:
+        rows = list(_csv.DictReader(f))
+    # Row for step 1 should have NaN (no captured value after detach)
+    step1_rows = [r for r in rows if r["step"] == "1"]
+    assert len(step1_rows) == 1
+    val = step1_rows[0]["max_abs_dgrad"]
+    import math
+    assert val == "nan" or math.isnan(float(val))
+
+
+def test_dgrad_probe_attach_length_mismatch_raises(tmp_path):
+    from latent_harness.core.probes import DgradProbe
+    probe = DgradProbe(output_path=tmp_path / "dgrad.csv")
+    layers = [torch.nn.Linear(4, 4), torch.nn.Linear(4, 4)]
+    import pytest
+    with pytest.raises(ValueError, match="layer count mismatch"):
+        probe.attach(layers, layer_names=["only_one"])

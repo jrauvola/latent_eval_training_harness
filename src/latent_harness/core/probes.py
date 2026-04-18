@@ -22,13 +22,22 @@ class DgradProbe:
     def __init__(self, output_path: Path | str):
         self.output_path = Path(output_path)
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.output_path.exists():
+            self.output_path.unlink()
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
         self._current: dict[str, float] = {}
         self._wrote_header = False
+        self._layer_names: list[str] = []
 
     def attach(self, layers: Iterable[nn.Module], layer_names: list[str]) -> None:
+        layers_list = list(layers)
+        if len(layers_list) != len(layer_names):
+            raise ValueError(
+                f"layer count mismatch: {len(layers_list)} modules vs "
+                f"{len(layer_names)} names"
+            )
         self._layer_names = list(layer_names)
-        for name, layer in zip(self._layer_names, layers):
+        for name, layer in zip(self._layer_names, layers_list):
             handle = layer.register_full_backward_hook(self._make_hook(name))
             self._handles.append(handle)
 
