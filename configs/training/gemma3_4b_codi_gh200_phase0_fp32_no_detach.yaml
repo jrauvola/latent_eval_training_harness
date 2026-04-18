@@ -79,9 +79,9 @@ trainer:
   logging_dir: artifacts/train/gemma3_4b_codi_gh200_phase0_fp32_no_detach/logs
   logging_steps: 1
   logging_nan_inf_filter: false
-  per_device_train_batch_size: 4
+  per_device_train_batch_size: 2   # fp32 activations are ~2x bf16; dropped from 4 to 2 to fit GH200
   per_device_eval_batch_size: 2
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2   # preserves effective batch size of 4 (matches Probe E baseline)
   num_train_epochs: 1
   learning_rate: 0.00002
   max_grad_norm: 1.0
