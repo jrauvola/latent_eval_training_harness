@@ -45,14 +45,46 @@ DEFAULT_QUEUE=(
   "configs/training/gemma3_4b_codi_gh200_v4_strict_no_latent_detach_fp32.yaml"
 )
 
+# Qwen3-4B 7-variant chain (Track 2 of 2026-04-17 investigation plan).
+# Ordered: P0 first (control), then bf16 V2/V3/V4, then fp32 V2'/V3'/V4'.
+QWEN3_QUEUE=(
+  "configs/training/qwen3_4b_codi_gh200_phase0_fp32_no_detach.yaml"
+  "configs/training/qwen3_4b_codi_gh200_v2_keep_last_2.yaml"
+  "configs/training/qwen3_4b_codi_gh200_v3_keep_last_2_cache_only.yaml"
+  "configs/training/qwen3_4b_codi_gh200_v4_reasoning_only.yaml"
+  "configs/training/qwen3_4b_codi_gh200_v2_keep_last_2_fp32.yaml"
+  "configs/training/qwen3_4b_codi_gh200_v3_keep_last_2_cache_only_fp32.yaml"
+  "configs/training/qwen3_4b_codi_gh200_v4_reasoning_only_fp32.yaml"
+)
+
+# Probe-only queue (Track 1): Gemma-3 + Qwen3 side-by-side dgrad probe.
+PROBE_QUEUE=(
+  "configs/training/gemma3_4b_codi_gh200_probe.yaml"
+  "configs/training/qwen3_4b_codi_gh200_probe.yaml"
+)
+
+# Select queue based on $CHAIN_MODE env var
+case "${CHAIN_MODE:-default}" in
+  qwen3)   QUEUE=("${QWEN3_QUEUE[@]}") ;;
+  probe)   QUEUE=("${PROBE_QUEUE[@]}") ;;
+  default) QUEUE=("${DEFAULT_QUEUE[@]}") ;;
+  *) echo "ERROR: unknown CHAIN_MODE=${CHAIN_MODE} (expected: default|qwen3|probe)" >&2; exit 2 ;;
+esac
+
+echo "[launcher] CHAIN_MODE=${CHAIN_MODE:-default} queue_length=${#QUEUE[@]}"
+for item in "${QUEUE[@]}"; do
+  echo "[launcher]   - ${item}"
+done
+
+# DRY_RUN guard: exit before any SSH/git side-effects (useful for queue selection tests).
+[[ -n "${DRY_RUN:-}" ]] && exit 0
+
 if [[ -n "${CONFIG_LIST_FILE:-}" ]]; then
   if [[ ! -f "${CONFIG_LIST_FILE}" ]]; then
     echo "ERROR: CONFIG_LIST_FILE=${CONFIG_LIST_FILE} not found" >&2
     exit 2
   fi
   mapfile -t QUEUE < "${CONFIG_LIST_FILE}"
-else
-  QUEUE=("${DEFAULT_QUEUE[@]}")
 fi
 
 CONFIGS_PAYLOAD="$(printf '%s\n' "${QUEUE[@]}")"
