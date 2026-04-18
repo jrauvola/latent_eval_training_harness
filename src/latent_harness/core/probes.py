@@ -81,6 +81,13 @@ def maybe_init_probes(model, runtime_config) -> dict | None:
     if not getattr(runtime_config, "probe_mode", False):
         return None
 
+    if model is None:
+        logger.error(
+            "maybe_init_probes called with model=None but probe_mode=True. "
+            "Probes will NOT be attached. Check trainer callback wiring."
+        )
+        return None
+
     out_dir = Path(runtime_config.probe_output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -100,9 +107,12 @@ def maybe_init_probes(model, runtime_config) -> dict | None:
             break
 
     if layers is None:
-        logger.warning(
-            "maybe_init_probes: could not locate decoder layers (model.model.layers "
-            "or similar). Skipping probe attachment."
+        logger.error(
+            "maybe_init_probes: could not locate decoder .layers ModuleList by walking "
+            "model wrapper chain (16-hop limit). Probes will NOT be attached. "
+            "Model top-level type: %s. Check that the base model exposes .model.layers "
+            "or set probe_mode=False.",
+            type(model).__name__,
         )
         return None
 
