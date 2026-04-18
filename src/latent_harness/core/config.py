@@ -80,6 +80,11 @@ class LatentRuntimeConfig:
     use_chat_template: bool = False
     #: Extra kwargs for ``tokenizer.apply_chat_template`` (e.g. ``enable_thinking`` for Qwen3).
     chat_template_kwargs: dict[str, Any] | None = None
+    #: When True, register per-layer dgrad + (optional) RMSNorm denom probes
+    #: and write per-step CSV to probe_output_dir. Off by default.
+    probe_mode: bool = False
+    #: Directory for probe CSV output. Required when probe_mode is True.
+    probe_output_dir: str | None = None
 
     def __post_init__(self) -> None:
         if self.detach_keep_last_k is not None:
@@ -102,4 +107,9 @@ class LatentRuntimeConfig:
             raise ValueError(
                 "fp32 and bf16 are mutually exclusive; set at most one to True "
                 "(fp32=True forces full 32-bit precision; bf16=True uses bfloat16 on CUDA)."
+            )
+        if self.probe_mode and not self.probe_output_dir:
+            raise ValueError(
+                "probe_mode=True requires probe_output_dir to be set "
+                "(give a writable directory path)."
             )
