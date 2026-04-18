@@ -65,3 +65,61 @@ class DgradProbe:
         for h in self._handles:
             h.remove()
         self._handles.clear()
+
+
+class RMSNormDenomProbe:
+    """Capture distribution of 1/sqrt(mean(x^2) + eps) at selected RMSNorm modules.
+
+    Logs per-step quantiles (min, median, max) of the denominator across the
+    batch × sequence axes. Used to test whether Q/K RMSNorm denominator
+    variability correlates with gradient instability in Gemma-3.
+    """
+
+    def __init__(self, output_path: Path | str):
+        self.output_path = Path(output_path)
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.output_path.exists():
+            self.output_path.unlink()
+        self._handles: list[torch.utils.hooks.RemovableHandle] = []
+        self._current: dict[str, torch.Tensor] = {}
+        self._wrote_header = False
+        self._names: list[str] = []
+
+    def attach(self, named_modules: dict[str, nn.Module]) -> None:
+        self._names = list(named_modules.keys())
+        for name, mod in named_modules.items():
+            handle = mod.register_forward_hook(self._make_hook(name))
+            self._handles.append(handle)
+
+    def _make_hook(self, name: str):
+        def hook(module, inp, output):
+            # Recover denom from the input tensor. Works for standard RMSNorm.
+            x = inp[0] if isinstance(inp, tuple) else inp
+            eps = getattr(module, "eps", 1e-6)
+            with torch.no_grad():
+                var = x.detach().to(torch.float32).pow(2).mean(dim=-1)
+                denom = torch.rsqrt(var + eps)
+                self._current[name] = denom.flatten().cpu()
+        return hook
+
+    def flush(self, step: int) -> None:
+        with self.output_path.open("a", newline="") as f:
+            writer = csv.writer(f)
+            if not self._wrote_header:
+                writer.writerow(["step", "name", "denom_min", "denom_median", "denom_max"])
+                self._wrote_header = True
+            for name in self._names:
+                t = self._current.get(name)
+                if t is None:
+                    writer.writerow([step, name, "", "", ""])
+                else:
+                    writer.writerow([
+                        step, name,
+                        float(t.min()), float(t.median()), float(t.max()),
+                    ])
+        self._current.clear()
+
+    def detach_all(self) -> None:
+        for h in self._handles:
+            h.remove()
+        self._handles.clear()

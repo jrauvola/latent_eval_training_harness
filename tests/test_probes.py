@@ -144,3 +144,28 @@ def test_dgrad_probe_attach_length_mismatch_raises(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="layer count mismatch"):
         probe.attach(layers, layer_names=["only_one"])
+
+
+def test_rmsnorm_denom_probe_captures_per_step(tmp_path):
+    from latent_harness.core.probes import RMSNormDenomProbe
+
+    # Minimal RMSNorm-like module
+    class RMSNorm(torch.nn.Module):
+        def __init__(self, dim, eps=1e-6):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(dim))
+            self.eps = eps
+        def forward(self, x):
+            var = x.pow(2).mean(dim=-1, keepdim=True)
+            return x * torch.rsqrt(var + self.eps) * self.weight
+
+    norm = RMSNorm(16)
+    probe = RMSNormDenomProbe(output_path=tmp_path / "denom.csv")
+    probe.attach({"q_norm_l0": norm})
+    x = torch.randn(4, 16)
+    _ = norm(x)
+    probe.flush(step=0)
+    probe.detach_all()
+    content = (tmp_path / "denom.csv").read_text()
+    assert "step,name,denom_min,denom_median,denom_max" in content
+    assert "0,q_norm_l0," in content
