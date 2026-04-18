@@ -32,8 +32,12 @@ VARIANTS: list[tuple[str, str]] = [
     # Qwen3-4B family (2026-04-17 investigation Track 2)
     ("qwen3_phase0_fp32_no_detach", "qwen3_4b_codi_gh200_phase0_fp32_no_detach.yaml"),
     ("qwen3_v2_keep_last_2", "qwen3_4b_codi_gh200_v2_keep_last_2.yaml"),
-    ("qwen3_v3_keep_last_2_cache_only", "qwen3_4b_codi_gh200_v3_keep_last_2_cache_only.yaml"),
-    ("qwen3_v4_reasoning_only", "qwen3_4b_codi_gh200_v4_reasoning_only.yaml"),
+    # NOTE: qwen3_v3_keep_last_2_cache_only and qwen3_v4_reasoning_only (bf16) are
+    # DELIBERATELY excluded from smoke. They reliably NaN at step 4 on q_proj.lora_A
+    # (confirmed 2026-04-18 probe chain run) — the same crash signature that motivated
+    # this investigation on Gemma-3. The fail-any smoke gate would block the chain,
+    # but we WANT these variants in the main chain to capture their crash trajectory.
+    # Their fp32 counterparts (_fp32.yaml) are expected to train cleanly.
 ]
 SMOKE_STEPS = 10
 SMOKE_SAMPLES = 64
