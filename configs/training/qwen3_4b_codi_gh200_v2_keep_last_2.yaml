@@ -26,7 +26,6 @@ data:
     - proofwriter
   registry_path: configs/datasets/full_registry.yaml
   cache_dir: .cache/huggingface
-  snapshot_dir: artifacts/datasets/training_snapshots
   max_samples_per_dataset: 8192
   include_last_cot: false
   answer_only: false
