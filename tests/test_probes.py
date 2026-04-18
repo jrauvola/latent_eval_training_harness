@@ -169,3 +169,116 @@ def test_rmsnorm_denom_probe_captures_per_step(tmp_path):
     content = (tmp_path / "denom.csv").read_text()
     assert "step,name,denom_min,denom_median,denom_max" in content
     assert "0,q_norm_l0," in content
+
+
+def test_rmsnorm_denom_probe_captures_known_analytical_value(tmp_path):
+    """For x = all-ones tensor, mean(x²) = 1.0, denom = 1/sqrt(1+eps) ≈ 1.0."""
+    from latent_harness.core.probes import RMSNormDenomProbe
+
+    class RMSNorm(torch.nn.Module):
+        def __init__(self, dim, eps=1e-6):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(dim))
+            self.eps = eps
+        def forward(self, x):
+            var = x.pow(2).mean(dim=-1, keepdim=True)
+            return x * torch.rsqrt(var + self.eps) * self.weight
+
+    norm = RMSNorm(16, eps=1e-6)
+    probe = RMSNormDenomProbe(output_path=tmp_path / "denom.csv")
+    probe.attach({"l0": norm})
+    _ = norm(torch.ones(4, 16))   # x² mean = 1.0 exactly → denom = rsqrt(1 + 1e-6) ≈ 0.9999995
+    probe.flush(step=0)
+    probe.detach_all()
+
+    import csv as _csv
+    with (tmp_path / "denom.csv").open() as f:
+        rows = list(_csv.DictReader(f))
+    assert len(rows) == 1
+    row = rows[0]
+    # min == median == max since every element is identical
+    for col in ("denom_min", "denom_median", "denom_max"):
+        assert abs(float(row[col]) - 1.0) < 1e-4, f"{col}: {row[col]}"
+
+
+def test_rmsnorm_denom_probe_last_forward_wins(tmp_path):
+    """Unlike DgradProbe's running-max, RMSNormDenomProbe stores only the LAST forward's distribution.
+
+    Three forwards with constant inputs at scales 3.0, 7.0, 2.0 (so denom is
+    rsqrt(9), rsqrt(49), rsqrt(4) = 0.333, 0.143, 0.500).
+    Last-forward-wins → emitted values reflect scale 2.0 → denom ≈ 0.5.
+    Running-max would give 0.5 here (same answer, bad discriminator), so we
+    additionally check the minimum is also 0.5 (not 0.143 from the middle forward).
+    """
+    from latent_harness.core.probes import RMSNormDenomProbe
+
+    class RMSNorm(torch.nn.Module):
+        def __init__(self, dim, eps=1e-6):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(dim))
+            self.eps = eps
+        def forward(self, x):
+            var = x.pow(2).mean(dim=-1, keepdim=True)
+            return x * torch.rsqrt(var + self.eps) * self.weight
+
+    norm = RMSNorm(16, eps=1e-6)
+    probe = RMSNormDenomProbe(output_path=tmp_path / "denom.csv")
+    probe.attach({"l0": norm})
+
+    for scale in (3.0, 7.0, 2.0):
+        _ = norm(torch.ones(4, 16) * scale)
+
+    probe.flush(step=0)
+    probe.detach_all()
+
+    import csv as _csv
+    with (tmp_path / "denom.csv").open() as f:
+        rows = list(_csv.DictReader(f))
+    # Expected denom for scale=2: rsqrt(4 + 1e-6) ≈ 0.5
+    expected = 0.5
+    # With constant input at scale 2.0, min == median == max ≈ 0.5.
+    # Running-max bug would yield min ≈ 0.143 (scale=7 forward leaked in).
+    # First-forward-wins bug would yield ≈ 0.333 (scale=3).
+    for col in ("denom_min", "denom_median", "denom_max"):
+        val = float(rows[0][col])
+        assert abs(val - expected) < 1e-3, (
+            f"{col}: expected {expected} (last-forward scale 2.0), got {val}. "
+            f"running-max bug → ~0.143, first-write bug → ~0.333"
+        )
+
+
+def test_rmsnorm_denom_probe_detach_stops_hook_firing(tmp_path):
+    """After detach_all, further forward must not update state."""
+    from latent_harness.core.probes import RMSNormDenomProbe
+
+    class RMSNorm(torch.nn.Module):
+        def __init__(self, dim, eps=1e-6):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(dim))
+            self.eps = eps
+        def forward(self, x):
+            var = x.pow(2).mean(dim=-1, keepdim=True)
+            return x * torch.rsqrt(var + self.eps) * self.weight
+
+    norm = RMSNorm(16, eps=1e-6)
+    probe = RMSNormDenomProbe(output_path=tmp_path / "denom.csv")
+    probe.attach({"l0": norm})
+
+    # First forward — hook fires
+    _ = norm(torch.ones(4, 16))
+    probe.flush(step=0)
+    probe.detach_all()
+
+    # Second forward with scale 100 — hook should NOT fire
+    _ = norm(torch.ones(4, 16) * 100)
+    probe.flush(step=1)
+
+    import csv as _csv
+    with (tmp_path / "denom.csv").open() as f:
+        rows = list(_csv.DictReader(f))
+    step1_rows = [r for r in rows if r["step"] == "1"]
+    assert len(step1_rows) == 1
+    # Step 1 should have empty values (no data captured)
+    assert step1_rows[0]["denom_min"] in ("", "nan")
+    assert step1_rows[0]["denom_median"] in ("", "nan")
+    assert step1_rows[0]["denom_max"] in ("", "nan")
