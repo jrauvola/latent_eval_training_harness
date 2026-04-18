@@ -11,9 +11,10 @@ from typing import Any
 import torch
 import torch.nn as nn
 from safetensors.torch import save_file as save_safetensors
-from transformers import Trainer
+from transformers import Trainer, TrainerCallback
 
 from latent_harness.core.io import ensure_dir, load_yaml_config
+from latent_harness.core.probes import maybe_init_probes
 from latent_harness.core.runtime import NumericalInstabilityError
 from latent_harness.training.config import TrainingConfig
 from latent_harness.training.methods import get_method_recipe
@@ -378,6 +379,34 @@ class LatentTrainer(TrainingTelemetryMixin, Trainer):
         del _internal_call
 
 
+class ProbeCallback(TrainerCallback):
+    """Attach dgrad / rmsnorm probes at train start, flush per step, detach at end."""
+
+    def __init__(self, runtime_config):
+        self.runtime_config = runtime_config
+        self.probes: dict | None = None
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        self.probes = maybe_init_probes(model, self.runtime_config)
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self.probes is None:
+            return
+        step = state.global_step
+        if self.probes.get("dgrad") is not None:
+            self.probes["dgrad"].flush(step=step)
+        if self.probes.get("rmsnorm") is not None:
+            self.probes["rmsnorm"].flush(step=step)
+
+    def on_train_end(self, args, state, control, **kwargs):
+        if self.probes is None:
+            return
+        if self.probes.get("dgrad") is not None:
+            self.probes["dgrad"].detach_all()
+        if self.probes.get("rmsnorm") is not None:
+            self.probes["rmsnorm"].detach_all()
+
+
 class StandardSFTModel(nn.Module):
     def __init__(self, runtime_model: nn.Module) -> None:
         super().__init__()
@@ -558,6 +587,12 @@ def run_training_from_config(config_path: str) -> None:
             data_module=data_module,
         )
     )
+    if getattr(config.runtime, "probe_mode", False):
+        logger.info(
+            "probe_mode enabled; attaching ProbeCallback output_dir=%s",
+            config.runtime.probe_output_dir,
+        )
+        trainer.add_callback(ProbeCallback(config.runtime))
     resume_checkpoint = config.trainer.get("resume_from_checkpoint")
     trainer._record_event(
         "train_start",

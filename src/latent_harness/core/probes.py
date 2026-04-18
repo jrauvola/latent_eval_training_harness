@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import csv
+import logging
 from pathlib import Path
 from typing import Iterable
 
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 class DgradProbe:
@@ -65,6 +68,63 @@ class DgradProbe:
         for h in self._handles:
             h.remove()
         self._handles.clear()
+
+
+def maybe_init_probes(model, runtime_config) -> dict | None:
+    """If runtime_config.probe_mode is True, attach DgradProbe + optional RMSNormDenomProbe.
+
+    Returns:
+        None if probe_mode is False.
+        Otherwise dict: {"dgrad": DgradProbe, "rmsnorm": RMSNormDenomProbe | None}.
+        Caller is responsible for calling flush(step) per optimizer step and detach_all() at end.
+    """
+    if not getattr(runtime_config, "probe_mode", False):
+        return None
+
+    out_dir = Path(runtime_config.probe_output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Walk the model wrappers (PEFT/LoRA/etc.) looking for the decoder layer stack.
+    m = model
+    layers = None
+    # Safety guard against infinite loops from self-referential wrappers.
+    for _ in range(16):
+        if hasattr(m, "layers") and isinstance(m.layers, torch.nn.ModuleList):
+            layers = m.layers
+            break
+        if hasattr(m, "model"):
+            m = m.model
+        elif hasattr(m, "base_model"):
+            m = m.base_model
+        else:
+            break
+
+    if layers is None:
+        logger.warning(
+            "maybe_init_probes: could not locate decoder layers (model.model.layers "
+            "or similar). Skipping probe attachment."
+        )
+        return None
+
+    dgrad_probe = DgradProbe(output_path=out_dir / "dgrad_per_layer.csv")
+    dgrad_probe.attach(layers, [f"layer_{i}" for i in range(len(layers))])
+
+    rmsnorm_probe = None
+    if (
+        len(layers) > 0
+        and hasattr(layers[0], "self_attn")
+        and hasattr(layers[0].self_attn, "q_norm")
+        and hasattr(layers[0].self_attn, "k_norm")
+    ):
+        rmsnorm_probe = RMSNormDenomProbe(output_path=out_dir / "qk_rmsnorm_denom.csv")
+        rmsnorm_probe.attach(
+            {
+                "q_norm_l0": layers[0].self_attn.q_norm,
+                "k_norm_l0": layers[0].self_attn.k_norm,
+            }
+        )
+
+    return {"dgrad": dgrad_probe, "rmsnorm": rmsnorm_probe}
 
 
 class RMSNormDenomProbe:

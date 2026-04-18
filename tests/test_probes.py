@@ -282,3 +282,53 @@ def test_rmsnorm_denom_probe_detach_stops_hook_firing(tmp_path):
     assert step1_rows[0]["denom_min"] in ("", "nan")
     assert step1_rows[0]["denom_median"] in ("", "nan")
     assert step1_rows[0]["denom_max"] in ("", "nan")
+
+
+def test_probe_callback_attaches_and_flushes(tmp_path, monkeypatch):
+    """Unit test for ProbeCallback: verifies on_train_begin attaches probes
+    and on_step_end flushes them."""
+    from latent_harness.training.trainer import ProbeCallback
+    from latent_harness.core.config import LatentRuntimeConfig
+
+    # Track calls via patched maybe_init_probes
+    call_log = {"init": 0, "flush": 0, "detach": 0}
+
+    class FakeProbe:
+        def flush(self, step):
+            call_log["flush"] += 1
+        def detach_all(self):
+            call_log["detach"] += 1
+
+    def fake_init(model, runtime_config):
+        call_log["init"] += 1
+        return {"dgrad": FakeProbe(), "rmsnorm": None}
+
+    monkeypatch.setattr("latent_harness.training.trainer.maybe_init_probes", fake_init)
+
+    runtime_cfg = LatentRuntimeConfig(probe_mode=True, probe_output_dir=str(tmp_path))
+    cb = ProbeCallback(runtime_config=runtime_cfg)
+
+    # Simulate trainer lifecycle
+    class _DummyState:
+        global_step = 5
+    cb.on_train_begin(args=None, state=_DummyState(), control=None, model=None)
+    cb.on_step_end(args=None, state=_DummyState(), control=None)
+    cb.on_train_end(args=None, state=_DummyState(), control=None)
+
+    assert call_log == {"init": 1, "flush": 1, "detach": 1}
+
+
+def test_probe_callback_skips_when_probe_mode_off(tmp_path):
+    from latent_harness.training.trainer import ProbeCallback
+    from latent_harness.core.config import LatentRuntimeConfig
+
+    runtime_cfg = LatentRuntimeConfig()  # probe_mode=False by default
+    cb = ProbeCallback(runtime_config=runtime_cfg)
+
+    class _DummyState:
+        global_step = 0
+    cb.on_train_begin(args=None, state=_DummyState(), control=None, model=None)
+    assert cb.probes is None
+    # on_step_end and on_train_end should be no-ops (no exceptions)
+    cb.on_step_end(args=None, state=_DummyState(), control=None)
+    cb.on_train_end(args=None, state=_DummyState(), control=None)
