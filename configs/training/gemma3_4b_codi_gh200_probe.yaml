@@ -1,8 +1,9 @@
 method: codi
 
 # Track 1 probe config: Gemma-3-4B, bf16, NO detach, 200 steps.
-# Used to produce dgrad_per_layer.csv + qk_rmsnorm_denom.csv for the
-# "is the problem Q/K RMSNorm amplification?" hypothesis test.
+# Matches gemma3_4b_codi_gh200_phase0_fp32_no_detach.yaml (the known crash-test
+# regime) except: bf16 precision, max_steps=200, save_strategy=no, probe_mode=true.
+# Batch/dataset parity with phase0 is deliberate — to compare fp32 vs bf16 cleanly.
 
 model:
   base_model_name_or_path: google/gemma-3-4b-it
@@ -18,10 +19,18 @@ model:
 data:
   dataset_names:
     - gsm8k_aug_nl
+    - commonsense_cot
+    - strategyqa_cot
+    - prontoqa
+  registry_ids:
+    - numinamath_15
+    - openthoughts3_12m
+    - natural_reasoning
+    - proofwriter
   registry_path: configs/datasets/full_registry.yaml
   cache_dir: .cache/huggingface
   snapshot_dir: artifacts/datasets/training_snapshots
-  max_samples_per_dataset: 4096
+  max_samples_per_dataset: 8192
   include_last_cot: false
   answer_only: false
   max_token_num: 768
@@ -59,7 +68,8 @@ trainer:
   logging_steps: 1
   logging_nan_inf_filter: false
   per_device_train_batch_size: 2
-  gradient_accumulation_steps: 1
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 2
   max_steps: 200
   num_train_epochs: 1
   learning_rate: 0.00002
@@ -71,4 +81,4 @@ trainer:
   warmup_ratio: 0.1
   lr_scheduler_type: cosine
   report_to: []
-  dataloader_num_workers: 2
+  dataloader_num_workers: 4
