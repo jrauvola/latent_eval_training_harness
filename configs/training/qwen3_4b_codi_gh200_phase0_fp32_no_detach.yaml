@@ -24,7 +24,6 @@ data:
     - prontoqa
   registry_ids:
     - numinamath_15
-    - openthoughts3_12m
     - natural_reasoning
     - proofwriter
   registry_path: configs/datasets/full_registry.yaml
