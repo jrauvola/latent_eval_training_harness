@@ -79,6 +79,12 @@ def test_dgrad_probe_captures_known_analytical_value(tmp_path):
 def test_dgrad_probe_takes_running_max_across_multiple_backwards(tmp_path):
     """CODI performs multiple forward/backward passes per training step.
     Probe must take the max across all backwards within a single flush window.
+
+    Uses scales [3.0, 7.0, 2.0] so:
+      - running-max   → 7.0  (correct)
+      - first-write   → 3.0  (wrong)
+      - last-write    → 2.0  (wrong)
+    Any implementation that doesn't actually take a max will fail.
     """
     from latent_harness.core.probes import DgradProbe
 
@@ -86,13 +92,9 @@ def test_dgrad_probe_takes_running_max_across_multiple_backwards(tmp_path):
     probe = DgradProbe(output_path=tmp_path / "dgrad.csv")
     probe.attach([layer], layer_names=["l0"])
 
-    # First backward: loss.sum() * 1.0 scale → max|grad_output| = 1.0
-    x1 = torch.randn(2, 4, requires_grad=True)
-    (layer(x1).sum()).backward()
-
-    # Second backward: loss.sum() * 5.0 scale → max|grad_output| = 5.0
-    x2 = torch.randn(2, 4, requires_grad=True)
-    (layer(x2).sum() * 5.0).backward()
+    for scale in (3.0, 7.0, 2.0):
+        x = torch.randn(2, 4, requires_grad=True)
+        (layer(x).sum() * scale).backward()
 
     probe.flush(step=0)
     probe.detach_all()
@@ -101,8 +103,10 @@ def test_dgrad_probe_takes_running_max_across_multiple_backwards(tmp_path):
     with (tmp_path / "dgrad.csv").open() as f:
         rows = list(_csv.DictReader(f))
     captured = float(rows[0]["max_abs_dgrad"])
-    # Should be 5.0 (running max), not 1.0 (first) or overwritten by last
-    assert abs(captured - 5.0) < 1e-5, f"expected running max 5.0, got {captured}"
+    assert abs(captured - 7.0) < 1e-5, (
+        f"expected running max 7.0, got {captured} "
+        "(3.0 = first-write bug, 2.0 = last-write bug)"
+    )
 
 
 def test_dgrad_probe_detach_stops_hook_firing(tmp_path):
