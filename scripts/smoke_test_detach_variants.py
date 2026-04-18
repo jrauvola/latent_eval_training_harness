@@ -24,10 +24,16 @@ import yaml
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
 CONFIGS_DIR = HARNESS_ROOT / "configs" / "training"
 VARIANTS: list[tuple[str, str]] = [
+    # Gemma-3 family (historical chain)
     ("v2_keep_last_2", "gemma3_4b_codi_gh200_v2_keep_last_2.yaml"),
     ("v3_reasoning_only", "gemma3_4b_codi_gh200_v3_reasoning_only.yaml"),
     ("v4_strict_no_latent_detach", "gemma3_4b_codi_gh200_v4_strict_no_latent_detach.yaml"),
     ("phase0_fp32_no_detach", "gemma3_4b_codi_gh200_phase0_fp32_no_detach.yaml"),
+    # Qwen3-4B family (2026-04-17 investigation Track 2)
+    ("qwen3_phase0_fp32_no_detach", "qwen3_4b_codi_gh200_phase0_fp32_no_detach.yaml"),
+    ("qwen3_v2_keep_last_2", "qwen3_4b_codi_gh200_v2_keep_last_2.yaml"),
+    ("qwen3_v3_keep_last_2_cache_only", "qwen3_4b_codi_gh200_v3_keep_last_2_cache_only.yaml"),
+    ("qwen3_v4_reasoning_only", "qwen3_4b_codi_gh200_v4_reasoning_only.yaml"),
 ]
 SMOKE_STEPS = 10
 SMOKE_SAMPLES = 64
