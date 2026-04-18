@@ -189,6 +189,15 @@ REMOTE_HEAD="$(git rev-parse HEAD)"
 log "Remote HEAD pinned at ${REMOTE_HEAD}"
 update_status "git_checked_out: ${REMOTE_HEAD}"
 
+# Snapshot GPU state at chain start.
+nvidia_snapshot() {
+  local tag="$1"
+  local out="${CHAIN_LOG_DIR}/nvidia_smi_${tag}_$(date -u +%Y%m%dT%H%M%SZ).txt"
+  nvidia-smi > "${out}" 2>&1 || true
+  log "nvidia-smi snapshot (${tag}) -> ${out}"
+}
+nvidia_snapshot "chain_start"
+
 # Load CONFIG_LIST early so pre-flight check #4 can dry-run each config.
 mapfile -t CONFIG_LIST < <(printf '%s\n' "${CONFIGS}" | sed '/^$/d')
 
@@ -234,6 +243,24 @@ print(cfg.get('trainer', {}).get('output_dir', ''))
   log "output_dir=${out_dir}"
   log "log file: ${run_log}"
 
+  # GPU snapshot at run start
+  run_tag="$(basename "${out_dir}")"
+  nvidia_snapshot "before_${run_tag}"
+
+  # Start a background nvidia-smi sampler that writes a row every 60s.
+  gpu_sampler_log="${HARNESS_DIR}/${out_dir}/nvidia_smi_timeline.csv"
+  echo "timestamp_utc,gpu_util_pct,mem_used_mib,mem_total_mib,temp_c,power_w" > "${gpu_sampler_log}"
+  (
+    while true; do
+      local_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      row="$(nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw \
+                       --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
+      echo "${local_ts},${row}" >> "${gpu_sampler_log}" 2>/dev/null || true
+      sleep 60
+    done
+  ) &
+  gpu_sampler_pid=$!
+
   # Run training. Use the harness's own CLI. PYTHONPATH=src is required because
   # the package uses a src/ layout (matches run_lambda_codi_train.sh convention).
   set +e
@@ -244,6 +271,13 @@ print(cfg.get('trainer', {}).get('output_dir', ''))
     > "${run_log}" 2>&1
   rc=$?
   set -e
+
+  # Stop background GPU sampler
+  if [[ -n "${gpu_sampler_pid:-}" ]]; then
+    kill "${gpu_sampler_pid}" 2>/dev/null || true
+    wait "${gpu_sampler_pid}" 2>/dev/null || true
+  fi
+  nvidia_snapshot "after_${run_tag}"
 
   if [[ ${rc} -eq 0 ]]; then
     touch "${HARNESS_DIR}/${out_dir}/.done"
@@ -256,6 +290,38 @@ print(cfg.get('trainer', {}).get('output_dir', ''))
     update_status "failed: ${cfg_path} exit=${rc}"
   fi
 done
+
+# -------- Phase 5: write chain summary -------------------------------------
+SUMMARY_FILE="${CHAIN_LOG_DIR}/chain_summary.md"
+{
+  echo "# Chain run summary — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo ""
+  echo "Feature branch: ${FEATURE_BRANCH} @ ${FEATURE_REF}"
+  echo "Chain mode: ${CHAIN_MODE_NAME:-<unset>}"
+  echo "Configs queued: ${#CONFIG_LIST[@]}"
+  echo ""
+  echo "| Variant | Status | Exit | Final-line of train.log |"
+  echo "|---------|--------|------|-------------------------|"
+  for cfg_path in "${CONFIG_LIST[@]}"; do
+    variant="$(basename "${cfg_path}" .yaml)"
+    out_dir="$(python3 -c "import yaml; print(yaml.safe_load(open('${HARNESS_DIR}/${cfg_path}')).get('trainer',{}).get('output_dir',''))")"
+    if [[ -f "${HARNESS_DIR}/${out_dir}/.done" ]]; then
+      status="DONE"; exit_code="0"
+    elif [[ -f "${HARNESS_DIR}/${out_dir}/.failed" ]]; then
+      status="FAILED"; exit_code="$(cat "${HARNESS_DIR}/${out_dir}/.exit_code" 2>/dev/null || echo '?')"
+    else
+      status="NO_MARKER"; exit_code="?"
+    fi
+    last_line=""
+    [[ -f "${HARNESS_DIR}/${out_dir}/train.log" ]] && last_line="$(tail -1 "${HARNESS_DIR}/${out_dir}/train.log" 2>/dev/null | tr '|' '/' | head -c 100)"
+    echo "| ${variant} | ${status} | ${exit_code} | ${last_line} |"
+  done
+  echo ""
+  echo "Chain log: ${CHAIN_LOG}"
+  echo "Chain status timeline: ${STATUS_FILE}"
+} > "${SUMMARY_FILE}"
+log "Wrote chain summary: ${SUMMARY_FILE}"
+update_status "summary_written: ${SUMMARY_FILE}"
 
 log "Chain complete."
 update_status "chain_complete"

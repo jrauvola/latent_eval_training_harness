@@ -74,6 +74,15 @@ while :; do
     fi
   fi
 
+  # 1b) Pull probe research artifacts (dgrad CSVs, heatmaps) when any exist.
+  LOCAL_PROBE_DIR="${ROOT_DIR}/../research_findings/dgrad_probe"
+  mkdir -p "${LOCAL_PROBE_DIR}"
+  rsync -az --partial -e "ssh ${SSH_OPTS[*]}" \
+       "${REMOTE_HOST}:${REMOTE_ROOT}/research_findings/dgrad_probe/" \
+       "${LOCAL_PROBE_DIR}/" 2>/dev/null \
+    && echo "${ts} probe artifacts synced -> ${LOCAL_PROBE_DIR}/" \
+    || true
+
   # 2) List train dirs on remote.
   train_dirs="$(ssh "${SSH_OPTS[@]}" "${REMOTE_HOST}" "ls -1 ${REMOTE_ROOT}/artifacts/train/ 2>/dev/null" || true)"
 
