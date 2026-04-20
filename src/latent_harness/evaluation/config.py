@@ -21,6 +21,35 @@ class EvaluationRuntimeConfig:
     top_k: int = 40
     top_p: float = 0.95
     num_passes: int = 1
+    #: Phase 1 extensions. --------------------------------------------------
+    #: When set, each model is evaluated once per value in this list by
+    #: overriding ``runtime.num_latent``. Same outputs/trace dirs are reused,
+    #: partitioned by ``numlatent_{n}`` subdir. Empty/None = use the value from
+    #: the model spec as-is (legacy behavior).
+    num_latent_sweep: list[int] | None = None
+    #: When True, latent injection is bypassed entirely (the model runs as a
+    #: plain instruction-finetuned causal LM with num_latent=0). Required when
+    #: the runtime would otherwise error on num_latent=0. See spec §4 Phase 1.
+    skip_latent_injection_at_zero: bool = True
+    #: Write per-(example, latent_step) logit-lens traces to
+    #: ``latent_traces_dir/{variant}/{benchmark}/numlatent_{n}/trace_{idx}.jsonl``.
+    dump_latent_traces: bool = False
+    latent_traces_dir: str = "research_findings/latent_traces"
+    latent_trace_topk: int = 10
+    #: Write per-example KV cache ``.npy`` dumps to
+    #: ``kv_dump_dir/{variant}/{benchmark}/kv_example_{idx}.npy``.
+    dump_kv_cache: bool = False
+    kv_dump_dir: str = "research_findings/kv_pca"
+    #: Cap on the number of examples (per variant/benchmark) that receive a
+    #: KV dump, because the files are expensive on disk.
+    kv_dump_max_examples: int = 200
+    kv_dump_final_layer_only: bool = True
+    #: Batch-level persistence threshold. After every ``persistence_every_examples``
+    #: examples (or every batch, whichever is smaller), the eval runner flushes
+    #: predictions.jsonl and running_summary.json. Non-negotiable per user memory
+    #: feedback_batch_eval_persistence.md — crashes must lose <= this many examples.
+    persistence_every_examples: int = 32
+    seed: int = 11
 
 
 InferenceStrategy = Literal["latent_cot", "standard_generation"]

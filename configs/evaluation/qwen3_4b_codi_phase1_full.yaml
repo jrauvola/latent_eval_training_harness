@@ -1,0 +1,199 @@
+# Phase 1 Capability + Interpretability Eval — 4 Qwen3-4B CODI variants.
+#
+# Spec: docs/superpowers/specs/2026-04-19-qwen3-eval-and-comparison-pipeline-design.md §4.
+#
+# Coverage:
+#   - variants (4): P0 fp32 baseline, V2 bf16 headline, V2' fp32 mirror, V3' fp32 cache-only.
+#   - benchmarks (3): gsm8k, gsm-hard, svamp.
+#   - num_latent sweep (4): 0, 2, 4, 8.
+#   - single seed (11) for the first pass; multi-seed follow-up gated on first-pass success.
+#
+# All matrix cells run under one process: 4 variants × 3 benchmarks × 4 num_latent = 48 evals.
+# Per-batch predictions.jsonl + running_summary.json are persisted under:
+#   artifacts/eval/qwen3_4b_codi_phase1/{variant}/{benchmark}_numlatent_{n}/
+# Latent traces + KV dumps (cap 200 examples per variant/benchmark) under:
+#   research_findings/latent_traces/{variant}/{benchmark}/numlatent_{n}/
+#   research_findings/kv_pca/{variant}/{benchmark}/numlatent_{n}/
+
+runtime:
+  output_dir: artifacts/eval/qwen3_4b_codi_phase1
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 4
+  progress_log_interval_batches: 10
+  # Keep full test sets; drop this cap if SVAMP time is the problem rather than GSM8k.
+  max_examples_per_benchmark: null
+  max_new_tokens: 256
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+  # Phase 1 sweep + interp knobs.
+  num_latent_sweep: [0, 2, 4, 8]
+  skip_latent_injection_at_zero: true
+  dump_latent_traces: true
+  latent_traces_dir: research_findings/latent_traces
+  latent_trace_topk: 10
+  dump_kv_cache: true
+  kv_dump_dir: research_findings/kv_pca
+  kv_dump_max_examples: 200
+  kv_dump_final_layer_only: true
+  persistence_every_examples: 32
+  seed: 11
+
+benchmarks:
+  - gsm8k
+  - gsm-hard
+  - svamp
+
+# NOTE: Each variant's ``runtime`` block must mirror its training-time recipe so
+# that the LatentReasoningRuntime reconstructs with the same projection/detach
+# shape expected by the checkpoint. The actual detach toggles are inert at eval
+# time (no gradient), but they stay for documentation + symmetry with training.
+
+models:
+  # Q-P0 — fp32 baseline, no detach.
+  - name: qwen3_4b_codi_fp32_baseline_no_detach
+    checkpoint_source: jrauvola/qwen3-4b-codi-fp32-baseline-no-detach
+    checkpoint_type: hf_repo
+    model_kind: latent_runtime
+    inference_strategy: latent_cot
+    model:
+      base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+      lora_r: 16
+      lora_alpha: 16
+      lora_dropout: 0.1
+      use_lora: true
+      full_precision: true
+      freeze_base_embeddings: true
+    runtime:
+      model_max_length: 768
+      num_latent: 2
+      detach_latent_between_steps: false
+      detach_cache_between_steps: false
+      detach_keep_last_k: null
+      detach_position_mode: all
+      use_prj: true
+      prj_dim: 2048
+      prj_dropout: 0.0
+      prj_no_ln: false
+      prj_fp32: true
+      prj_residual_gated: true
+      prj_gate_init: 0.0
+      remove_eos: true
+      bf16: false
+      fp32: true
+      seed: 11
+      use_chat_template: true
+      chat_template_kwargs:
+        enable_thinking: false
+
+  # Q-V2 — bf16 headline: step-boundary KV+latent detach, keep_last_2.
+  - name: qwen3_4b_codi_bf16_kv_latent_detach_last_2
+    checkpoint_source: jrauvola/qwen3-4b-codi-bf16-kv-latent-detach-last-2
+    checkpoint_type: hf_repo
+    model_kind: latent_runtime
+    inference_strategy: latent_cot
+    model:
+      base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+      lora_r: 16
+      lora_alpha: 16
+      lora_dropout: 0.1
+      use_lora: true
+      full_precision: true
+      freeze_base_embeddings: true
+    runtime:
+      model_max_length: 768
+      num_latent: 4
+      detach_latent_between_steps: true
+      detach_cache_between_steps: true
+      detach_keep_last_k: 2
+      detach_position_mode: all
+      use_prj: true
+      prj_dim: 2048
+      prj_dropout: 0.0
+      prj_no_ln: false
+      prj_fp32: true
+      prj_residual_gated: true
+      prj_gate_init: 0.0
+      remove_eos: true
+      bf16: true
+      fp32: false
+      seed: 11
+      use_chat_template: true
+      chat_template_kwargs:
+        enable_thinking: false
+
+  # Q-V2' — fp32 mirror of V2.
+  - name: qwen3_4b_codi_fp32_kv_latent_detach_last_2
+    checkpoint_source: jrauvola/qwen3-4b-codi-fp32-kv-latent-detach-last-2
+    checkpoint_type: hf_repo
+    model_kind: latent_runtime
+    inference_strategy: latent_cot
+    model:
+      base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+      lora_r: 16
+      lora_alpha: 16
+      lora_dropout: 0.1
+      use_lora: true
+      full_precision: true
+      freeze_base_embeddings: true
+    runtime:
+      model_max_length: 768
+      num_latent: 4
+      detach_latent_between_steps: true
+      detach_cache_between_steps: true
+      detach_keep_last_k: 2
+      detach_position_mode: all
+      use_prj: true
+      prj_dim: 2048
+      prj_dropout: 0.0
+      prj_no_ln: false
+      prj_fp32: true
+      prj_residual_gated: true
+      prj_gate_init: 0.0
+      remove_eos: true
+      bf16: false
+      fp32: true
+      seed: 11
+      use_chat_template: true
+      chat_template_kwargs:
+        enable_thinking: false
+
+  # Q-V3' — fp32 cache-only detach (keep_last_2 on cache, latent gradient retained).
+  - name: qwen3_4b_codi_fp32_kv_only_detach_last_2
+    checkpoint_source: jrauvola/qwen3-4b-codi-fp32-kv-only-detach-last-2
+    checkpoint_type: hf_repo
+    model_kind: latent_runtime
+    inference_strategy: latent_cot
+    model:
+      base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+      lora_r: 16
+      lora_alpha: 16
+      lora_dropout: 0.1
+      use_lora: true
+      full_precision: true
+      freeze_base_embeddings: true
+    runtime:
+      model_max_length: 768
+      num_latent: 4
+      detach_latent_between_steps: false
+      detach_cache_between_steps: true
+      detach_keep_last_k: 2
+      detach_position_mode: all
+      use_prj: true
+      prj_dim: 2048
+      prj_dropout: 0.0
+      prj_no_ln: false
+      prj_fp32: true
+      prj_residual_gated: true
+      prj_gate_init: 0.0
+      remove_eos: true
+      bf16: false
+      fp32: true
+      seed: 11
+      use_chat_template: true
+      chat_template_kwargs:
+        enable_thinking: false
