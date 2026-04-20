@@ -1,0 +1,89 @@
+method: codi
+
+# Qwen3-4B V2 cartography probe (Phase 1.5 run #1):
+# Reuses the full V2 stable recipe (bf16, step-boundary KV+latent detach,
+# keep_last_2) but trimmed to 100 steps with ProbeCallback enabled. Produces
+# per-layer dgrad CSVs for the stable-regime gradient profile. Paired with
+# ``qwen3_4b_codi_gh200_probe.yaml`` (P0 bf16 crash repro) for the gate
+# decision described in 2026-04-19-qwen3-eval-and-comparison-pipeline-design.md
+# §Phase 1.5.
+
+model:
+  base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+  hf_token:
+  lora_r: 16
+  lora_alpha: 16
+  lora_dropout: 0.1
+  lora_init: true
+  use_lora: true
+  full_precision: true
+  freeze_base_embeddings: true
+
+data:
+  dataset_names:
+    - gsm8k_aug_nl
+    - commonsense_cot
+    - strategyqa_cot
+    - prontoqa
+  registry_ids:
+    - numinamath_15
+    - natural_reasoning
+    - proofwriter
+  registry_path: configs/datasets/full_registry.yaml
+  cache_dir: .cache/huggingface
+  max_samples_per_dataset: 8192
+  include_last_cot: false
+  answer_only: false
+  max_token_num: 768
+  validation_split_ratio: 0.05
+  validation_max_samples: 2048
+
+runtime:
+  model_max_length: 768
+  num_latent: 4
+  detach_latent_between_steps: true
+  detach_cache_between_steps: true
+  detach_keep_last_k: 2
+  detach_position_mode: all
+  use_prj: true
+  prj_dim: 2048
+  prj_dropout: 0.0
+  prj_no_ln: false
+  prj_fp32: true
+  prj_residual_gated: true
+  prj_gate_init: 0.0
+  distill_loss_div_std: true
+  distill_loss_std_floor: 0.001
+  distill_loss_type: smooth_l1
+  distill_loss_factor: 5.0
+  ref_loss_factor: 0.0
+  remove_eos: true
+  bf16: true
+  fp32: false
+  seed: 11
+  use_chat_template: true
+  chat_template_kwargs:
+    enable_thinking: false
+  probe_mode: true
+  probe_output_dir: research_findings/dgrad_probe/qwen3_4b_v2_stable_100steps
+
+trainer:
+  output_dir: artifacts/train/qwen3_4b_codi_gh200_v2_probe_cartography
+  logging_dir: artifacts/train/qwen3_4b_codi_gh200_v2_probe_cartography/logs
+  logging_steps: 1
+  logging_nan_inf_filter: false
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 4
+  max_steps: 100
+  num_train_epochs: 1
+  learning_rate: 0.00002
+  max_grad_norm: 1.0
+  eval_strategy: "no"
+  save_strategy: "no"
+  save_safetensors: true
+  weight_decay: 0.1
+  warmup_ratio: 0.3
+  lr_scheduler_type: cosine
+  report_to: []
+  dataloader_num_workers: 4

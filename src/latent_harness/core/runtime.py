@@ -411,6 +411,59 @@ class LatentReasoningRuntime(nn.Module):
             return base.embed_tokens
         raise AttributeError("Could not locate input embedding layer")
 
+    @property
+    def layers(self) -> nn.ModuleList:
+        """Return the decoder ``nn.ModuleList`` of the wrapped base model.
+
+        Exposed so ``ProbeCallback`` / ``maybe_init_probes`` can attach
+        per-layer backward hooks without relying on a brittle attribute walk
+        through the PEFT wrapper chain. Handles:
+
+        - Qwen3 / Llama / Mistral / GPT-NeoX: ``base.model.layers``
+        - Gemma-3 multimodal (``Gemma3ForConditionalGeneration``): the text
+          stack is at ``base.model.language_model.layers``. The 16-hop
+          walker used to miss this because ``Gemma3Model`` has neither
+          ``.layers`` nor ``.model`` nor ``.base_model`` — only
+          ``.language_model``.
+        - GPT-2: ``base.transformer.h``
+        - Pythia: ``base.gpt_neox.layers``
+
+        Raises ``AttributeError`` if the decoder stack cannot be located —
+        caller (``maybe_init_probes``) degrades gracefully by skipping
+        probe attachment and logging the failure.
+        """
+        base = self.model.get_base_model() if hasattr(self.model, "get_base_model") else self.model
+        model_name = self.model_config.base_model_name_or_path.lower()
+        if "pythia" in model_name and hasattr(base, "gpt_neox") and hasattr(base.gpt_neox, "layers"):
+            return base.gpt_neox.layers
+        if "gpt2" in model_name and hasattr(base, "transformer") and hasattr(base.transformer, "h"):
+            return base.transformer.h
+        # Gemma-3 ForConditionalGeneration path: base.model.language_model is the text stack.
+        if hasattr(base, "model") and hasattr(base.model, "language_model"):
+            language_model = base.model.language_model
+            if hasattr(language_model, "layers") and isinstance(language_model.layers, nn.ModuleList):
+                return language_model.layers
+            if (
+                hasattr(language_model, "model")
+                and hasattr(language_model.model, "layers")
+                and isinstance(language_model.model.layers, nn.ModuleList)
+            ):
+                return language_model.model.layers
+        # Standard CausalLM path: base.model.layers (Qwen3, Llama, Mistral, Gemma3ForCausalLM).
+        if (
+            hasattr(base, "model")
+            and hasattr(base.model, "layers")
+            and isinstance(base.model.layers, nn.ModuleList)
+        ):
+            return base.model.layers
+        # Direct path: the base already IS the decoder (rare).
+        if hasattr(base, "layers") and isinstance(base.layers, nn.ModuleList):
+            return base.layers
+        raise AttributeError(
+            f"Could not locate decoder .layers ModuleList on base model "
+            f"({type(base).__name__}) for model_name={model_name!r}."
+        )
+
     def maybe_project(self, hidden_state: torch.Tensor) -> torch.Tensor:
         if not self.runtime_config.use_prj:
             return hidden_state

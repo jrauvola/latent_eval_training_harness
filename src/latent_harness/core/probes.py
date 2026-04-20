@@ -91,27 +91,49 @@ def maybe_init_probes(model, runtime_config) -> dict | None:
     out_dir = Path(runtime_config.probe_output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Walk the model wrappers (PEFT/LoRA/etc.) looking for the decoder layer stack.
-    m = model
+    # Primary path: LatentReasoningRuntime exposes a ``.layers`` property that
+    # knows how to unwrap the PEFT+Gemma3/Qwen3 wrapper chain. Preferred over
+    # the generic walker because it handles Gemma-3's multimodal layout where
+    # the decoder stack lives at ``.model.language_model.layers`` (the walker
+    # follows ``.model``/``.base_model`` only and misses ``.language_model``).
     layers = None
-    # Safety guard against infinite loops from self-referential wrappers.
-    for _ in range(16):
-        if hasattr(m, "layers") and isinstance(m.layers, torch.nn.ModuleList):
-            layers = m.layers
-            break
-        if hasattr(m, "model"):
-            m = m.model
-        elif hasattr(m, "base_model"):
-            m = m.base_model
-        else:
-            break
+    try:
+        candidate = getattr(model, "layers", None)
+    except AttributeError:
+        # Property getter raised — fall through to the walker.
+        candidate = None
+    if isinstance(candidate, torch.nn.ModuleList):
+        layers = candidate
+
+    # Fallback: walk the model wrappers (PEFT/LoRA/etc.) looking for the
+    # decoder layer stack. Kept for models that don't route through
+    # ``LatentReasoningRuntime`` (e.g. raw HF CausalLM in a test harness).
+    if layers is None:
+        m = model
+        # Safety guard against infinite loops from self-referential wrappers.
+        for _ in range(16):
+            if hasattr(m, "layers") and isinstance(m.layers, torch.nn.ModuleList):
+                layers = m.layers
+                break
+            # Prefer ``.language_model`` (Gemma-3 ForConditionalGeneration's
+            # text stack) before the generic ``.model`` / ``.base_model``
+            # delegates, so the walker doesn't get stuck at Gemma3Model.
+            if hasattr(m, "language_model"):
+                m = m.language_model
+            elif hasattr(m, "model"):
+                m = m.model
+            elif hasattr(m, "base_model"):
+                m = m.base_model
+            else:
+                break
 
     if layers is None:
         logger.error(
-            "maybe_init_probes: could not locate decoder .layers ModuleList by walking "
-            "model wrapper chain (16-hop limit). Probes will NOT be attached. "
-            "Model top-level type: %s. Check that the base model exposes .model.layers "
-            "or set probe_mode=False.",
+            "maybe_init_probes: could not locate decoder .layers ModuleList via "
+            "runtime.layers property or by walking model wrapper chain (16-hop limit). "
+            "Probes will NOT be attached. Model top-level type: %s. Check that the "
+            "runtime exposes .layers or that the base model has .model.layers; "
+            "alternatively set probe_mode=False.",
             type(model).__name__,
         )
         return None

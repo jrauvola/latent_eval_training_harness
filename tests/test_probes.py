@@ -332,3 +332,157 @@ def test_probe_callback_skips_when_probe_mode_off(tmp_path):
     # on_step_end and on_train_end should be no-ops (no exceptions)
     cb.on_step_end(args=None, state=_DummyState(), control=None)
     cb.on_train_end(args=None, state=_DummyState(), control=None)
+
+
+# ---------- Wrapper-walker regression tests (feature/probe-walker-fix) ----------
+#
+# These tests exercise ``maybe_init_probes`` against toy modules that mimic the
+# Qwen3 and Gemma-3 wrapper chains we observe at runtime. They are the
+# regression harness for the 16-hop walker bug where Gemma-3 dgrad CSVs never
+# got produced because the walker only followed ``.model``/``.base_model`` and
+# missed ``Gemma3Model.language_model``.
+
+
+def _make_toy_layers(n: int = 4) -> torch.nn.ModuleList:
+    return torch.nn.ModuleList([torch.nn.Linear(4, 4) for _ in range(n)])
+
+
+def test_maybe_init_probes_walks_qwen3_style_chain(tmp_path):
+    """Simulates ``LatentReasoningRuntime → PeftModel → Qwen3ForCausalLM → Qwen3Model → layers``."""
+    from latent_harness.core.config import LatentRuntimeConfig
+    from latent_harness.core.probes import maybe_init_probes
+
+    layers = _make_toy_layers()
+
+    class FakeQwen3Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = layers
+
+    class FakeQwen3ForCausalLM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = FakeQwen3Model()
+
+    class FakePeftModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            # PeftModel delegates ``.model`` to base_model.model in practice;
+            # for the walker we just need the attribute chain to resolve.
+            self.model = FakeQwen3ForCausalLM()
+
+    class FakeRuntime(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = FakePeftModel()
+
+    cfg = LatentRuntimeConfig(probe_mode=True, probe_output_dir=str(tmp_path))
+    probes = maybe_init_probes(FakeRuntime(), cfg)
+    assert probes is not None, "walker should locate Qwen3 .layers via .model chain"
+    assert probes.get("dgrad") is not None
+    probes["dgrad"].detach_all()
+
+
+def test_maybe_init_probes_walks_gemma3_conditional_generation_chain(tmp_path):
+    """Regression: ``LatentReasoningRuntime → PeftModel → Gemma3ForConditionalGeneration
+    → Gemma3Model → language_model (Gemma3TextModel) → layers``.
+
+    Before the fix, the 16-hop walker followed ``.model``/``.base_model`` only
+    and got stuck at ``Gemma3Model`` (which has ``.language_model`` but neither
+    ``.layers`` nor ``.model`` nor ``.base_model``), producing no dgrad CSV.
+    """
+    from latent_harness.core.config import LatentRuntimeConfig
+    from latent_harness.core.probes import maybe_init_probes
+
+    layers = _make_toy_layers()
+
+    class FakeGemma3TextModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = layers
+
+    class FakeGemma3Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            # Note: no ``.layers`` / ``.model`` / ``.base_model`` — only
+            # ``.language_model``. This is what trips the old walker.
+            self.language_model = FakeGemma3TextModel()
+
+    class FakeGemma3ForCondGen(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = FakeGemma3Model()
+
+    class FakePeftModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = FakeGemma3ForCondGen()
+
+    class FakeRuntime(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = FakePeftModel()
+
+    cfg = LatentRuntimeConfig(probe_mode=True, probe_output_dir=str(tmp_path))
+    probes = maybe_init_probes(FakeRuntime(), cfg)
+    assert probes is not None, (
+        "walker should locate Gemma-3 .layers via .language_model branch; "
+        "failure here reproduces the 16-hop walker bug."
+    )
+    assert probes.get("dgrad") is not None
+    probes["dgrad"].detach_all()
+
+
+def test_maybe_init_probes_prefers_runtime_layers_property(tmp_path):
+    """If the runtime exposes a ``.layers`` property, ``maybe_init_probes``
+    should use it directly instead of walking wrappers. This guarantees the
+    Gemma-3 fix works even if a future HF release renames the inner
+    attribute (e.g. ``.text_model`` vs ``.language_model``)."""
+    from latent_harness.core.config import LatentRuntimeConfig
+    from latent_harness.core.probes import maybe_init_probes
+
+    canonical_layers = _make_toy_layers()
+    decoy_layers = _make_toy_layers()
+
+    class FakeRuntime(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            # Decoy ``.model.layers`` that the walker WOULD pick up if the
+            # property weren't preferred.
+            self._inner = torch.nn.Module()
+            self._inner.layers = decoy_layers
+
+        @property
+        def model(self):  # walker would descend here
+            return self._inner
+
+        @property
+        def layers(self):  # property takes precedence over the walker
+            return canonical_layers
+
+    probes = maybe_init_probes(
+        FakeRuntime(),
+        LatentRuntimeConfig(probe_mode=True, probe_output_dir=str(tmp_path)),
+    )
+    assert probes is not None
+    # The probe's layer_names length must match the CANONICAL layers, not the decoy.
+    # We expose this via _layer_names on DgradProbe.
+    assert len(probes["dgrad"]._layer_names) == len(canonical_layers)
+    probes["dgrad"].detach_all()
+
+
+def test_maybe_init_probes_returns_none_when_chain_has_no_layers(tmp_path):
+    """If the wrapper chain truly has no decoder stack, degrade gracefully."""
+    from latent_harness.core.config import LatentRuntimeConfig
+    from latent_harness.core.probes import maybe_init_probes
+
+    class Bare(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc = torch.nn.Linear(4, 4)  # no .layers, .model, .base_model
+
+    probes = maybe_init_probes(
+        Bare(),
+        LatentRuntimeConfig(probe_mode=True, probe_output_dir=str(tmp_path)),
+    )
+    assert probes is None
