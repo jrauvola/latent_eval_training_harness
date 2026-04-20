@@ -246,12 +246,13 @@ class LatentTrainer(TrainingTelemetryMixin, Trainer):
         diagnostics = outputs.get("diagnostics", {})
         if not torch.isfinite(loss_value):
             logger.error(
-                "Non-finite loss detected step=%s epoch=%s ce_loss=%s distill_loss=%s ref_ce_loss=%s diagnostics=%s batch_forensics=%s",
+                "Non-finite loss detected step=%s epoch=%s ce_loss=%s distill_loss=%s ref_ce_loss=%s explain_loss=%s diagnostics=%s batch_forensics=%s",
                 step,
                 self.state.epoch,
                 outputs["ce_loss"],
                 outputs["distill_loss"],
                 outputs["ref_ce_loss"],
+                outputs.get("explain_loss"),
                 diagnostics,
                 _summarize_batch_forensics(batch_forensics),
             )
@@ -266,6 +267,17 @@ class LatentTrainer(TrainingTelemetryMixin, Trainer):
                 "train/distill_loss": outputs["distill_loss"],
                 "train/ref_ce_loss": outputs["ref_ce_loss"],
             }
+            # SIM-CoT surfaces an extra auxiliary-decoder term; log both the
+            # weighted contribution (what's in the loss sum) and the raw
+            # sum-over-steps for diagnostics, plus the effective step count.
+            if "explain_loss" in outputs:
+                log_payload["train/explain_loss"] = outputs["explain_loss"]
+            if "explain_loss_raw" in outputs:
+                log_payload["train/explain_loss_raw"] = outputs["explain_loss_raw"]
+            if "explain_effective_steps" in outputs:
+                log_payload["train/explain_effective_steps"] = float(
+                    outputs["explain_effective_steps"]
+                )
             for key, value in diagnostics.items():
                 log_payload[f"debug/{key}"] = value
             self.log(log_payload)
@@ -377,6 +389,23 @@ class LatentTrainer(TrainingTelemetryMixin, Trainer):
         if processor is not None and hasattr(processor, "save_pretrained"):
             processor.save_pretrained(destination)
         del _internal_call
+
+
+class AuxDecoderDropCallback(TrainerCallback):
+    """Drop the SIM-CoT aux decoder just before the final save.
+
+    The on-disk ``state_dict`` already excludes aux-decoder keys (see
+    ``SimCotLatentRuntime.state_dict``), but dropping the module at
+    train_end ensures the post-training process does not hold 2x memory
+    while other teardown is running.
+    """
+
+    def on_train_end(self, args, state, control, model=None, **kwargs):
+        if model is None:
+            return
+        drop = getattr(model, "drop_aux_decoder", None)
+        if callable(drop):
+            drop()
 
 
 class ProbeCallback(TrainerCallback):
@@ -593,6 +622,9 @@ def run_training_from_config(config_path: str) -> None:
             config.runtime.probe_output_dir,
         )
         trainer.add_callback(ProbeCallback(config.runtime))
+    if getattr(config.runtime, "aux_decoder_enabled", False):
+        logger.info("aux_decoder_enabled=True; attaching AuxDecoderDropCallback")
+        trainer.add_callback(AuxDecoderDropCallback())
     resume_checkpoint = config.trainer.get("resume_from_checkpoint")
     trainer._record_event(
         "train_start",

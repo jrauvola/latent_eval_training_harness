@@ -85,6 +85,21 @@ class LatentRuntimeConfig:
     probe_mode: bool = False
     #: Directory for probe CSV output. Required when probe_mode is True.
     probe_output_dir: str | None = None
+    # --- SIM-CoT auxiliary step-decoder (method="sim_cot") ----------------------
+    #: Attach an auxiliary step decoder that predicts each explicit CoT step from
+    #: the corresponding latent embedding. Train-only; dropped on checkpoint save.
+    aux_decoder_enabled: bool = False
+    #: When True, the auxiliary decoder is a full second LM copy of the base
+    #: (SIM-CoT paper default — 2x model memory). When False, a shared-lm_head
+    #: approximation is used (cheaper; single-layer transformer block + the base
+    #: model's lm_head). Flip to False as a memory fallback. See spec §8.
+    aux_decoder_full_lm: bool = True
+    #: Weight on the explain-step CE averaged over effective steps.
+    #: Spec: ``total = ce + 20*distill + ref_ce + explain_loss_factor * (explain / max(1, effective_steps))``.
+    aux_decoder_explain_loss_factor: float = 1.0
+    #: Hidden size of the fallback shared-lm_head decoder block. Only used when
+    #: aux_decoder_full_lm=False. Defaults to a single-layer transformer.
+    aux_decoder_shared_head_layers: int = 1
 
     def __post_init__(self) -> None:
         if self.detach_keep_last_k is not None:

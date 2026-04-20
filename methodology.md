@@ -202,7 +202,7 @@ Every training methodology we add should be describable on the same axes:
 
 ## SIM-CoT
 
-- Status: planned
+- Status: implemented (Phase 2a, feature/phase2-sim-cot)
 - Core idea:
   stabilize implicit reasoning by supervising each latent token with an
   auxiliary decoder aligned to the corresponding explicit reasoning step.
@@ -212,12 +212,29 @@ Every training methodology we add should be describable on the same axes:
 - Data contract:
   explicit step-level reasoning traces, not only final CoT strings
 - Training signal:
-  latent reasoning objective plus auxiliary decoder step reconstruction
+  latent reasoning objective plus auxiliary decoder step reconstruction;
+  loss is `total = ce + 20*distill + ref_ce + explain_loss_factor *
+  (explain_loss_total / max(1, effective_steps))` (paper §3.2)
 - Inference contract:
   drop the auxiliary decoder and keep only the latent inference path
 - Main implementation implication:
-  training-only modules must be serializable separately from the eval-time model
-  contract
+  training-only modules must be serializable separately from the eval-time
+  model contract
+- Harness wiring:
+  `training/sim_cot.py` hosts `AuxiliaryStepDecoder`, `SimCotLatentRuntime`,
+  `SimCotLatentDataset`, and `make_sim_cot_data_module`. The registry entry
+  in `training/methods.py` plumbs the runtime + data builders in; a
+  `AuxDecoderDropCallback` wipes the aux decoder at train end; the runtime's
+  `state_dict` strips `aux_decoder.*` keys so saved artifacts match the
+  CODI inference contract. Full-LM aux decoder is the default (2x memory,
+  paper-faithful); flip `aux_decoder_full_lm=False` to fall back to a
+  shared-lm_head approximation when memory is tight.
+- Deviations from paper (to flag in writeup):
+  (1) dataset mix matches our V2 headline (gsm8k_aug_nl + numinamath_15 +
+  friends) rather than paper's GSM8k-aug-only; (2) V2 step-boundary
+  KV+latent detach + keep_last_2 is layered on top so bf16 stability is
+  held constant vs our V2 baseline; (3) shared-head fallback, if used,
+  is not numerically identical to the paper's full-LM aux decoder.
 
 ## CoLaR
 

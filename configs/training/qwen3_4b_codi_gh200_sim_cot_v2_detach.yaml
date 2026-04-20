@@ -1,0 +1,119 @@
+method: sim_cot
+
+# Qwen3-4B SIM-CoT (bf16) with V2 step-boundary detach + keep_last_2.
+#
+# Design rationale (from spec §4.2a):
+# - bf16 + V2 detach recipe is held constant vs our Q-V2 headline so the
+#   aux-decoder's contribution is isolated from the bf16 stability recipe.
+# - LoRA r=128 alpha=32 matches SIM-CoT paper's train_llama8b_gsm8k-aug-decoder-2
+#   hyperparams; this IS a deviation from our V2 (r=16, alpha=16). The spec
+#   task block explicitly calls for r=128/alpha=32 so we flag it in the
+#   writeup.
+# - Data mix matches V2 (gsm8k_aug_nl + numinamath_15 + friends), another
+#   deviation from SIM-CoT's GSM8k-only training (flagged in writeup).
+# - Loss composition: total = ce + 20*distill + ref_ce + 1.0*(explain / max(1, steps)).
+#   explain is computed against the "<<expr=value>>" step chunks extracted from
+#   the gsm8k_aug CoT trace (re-derived at the raw-text level so the
+#   extraction is tokenizer-agnostic).
+# - Aux decoder is a FULL LM copy per the paper. If GH200 memory is tight
+#   at run-time, flip aux_decoder_full_lm -> false for the shared-lm_head
+#   fallback (cheaper but a numerical-fidelity deviation — flag).
+
+model:
+  base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+  hf_token:
+  lora_r: 128
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_init: true
+  use_lora: true
+  full_precision: true
+  freeze_base_embeddings: true
+
+data:
+  dataset_names:
+    - gsm8k_aug_nl
+    - commonsense_cot
+    - strategyqa_cot
+    - prontoqa
+  registry_ids:
+    - numinamath_15
+    - natural_reasoning
+    - proofwriter
+  registry_path: configs/datasets/full_registry.yaml
+  cache_dir: .cache/huggingface
+  max_samples_per_dataset: 8192
+  include_last_cot: false
+  answer_only: false
+  max_token_num: 768
+  validation_split_ratio: 0.05
+  validation_max_samples: 2048
+
+runtime:
+  model_max_length: 768
+  num_latent: 4
+
+  # V2 step-boundary detach + keep_last_2 — identical to V2 headline.
+  detach_latent_between_steps: true
+  detach_cache_between_steps: true
+  detach_keep_last_k: 2
+  detach_position_mode: all
+
+  # Projection module — V2 recipe.
+  use_prj: true
+  prj_dim: 2048
+  prj_dropout: 0.0
+  prj_no_ln: false
+  prj_fp32: true
+  prj_residual_gated: true
+  prj_gate_init: 0.0
+
+  # Distillation + reference losses — V2 recipe.
+  distill_loss_div_std: true
+  distill_loss_std_floor: 0.001
+  distill_loss_type: smooth_l1
+  distill_loss_factor: 20.0
+  ref_loss_factor: 1.0
+
+  remove_eos: true
+  bf16: true
+  fp32: false
+  seed: 11
+  use_chat_template: true
+  chat_template_kwargs:
+    enable_thinking: false
+
+  # SIM-CoT aux decoder.
+  aux_decoder_enabled: true
+  aux_decoder_full_lm: true
+  aux_decoder_explain_loss_factor: 1.0
+  aux_decoder_shared_head_layers: 1
+
+trainer:
+  output_dir: artifacts/train/qwen3_4b_codi_gh200_sim_cot_v2_detach
+  logging_dir: artifacts/train/qwen3_4b_codi_gh200_sim_cot_v2_detach/logs
+  logging_steps: 1
+  logging_nan_inf_filter: false
+  # Smaller batch than plain V2 because the aux decoder doubles model memory.
+  # If OOM on GH200 at full-LM, drop per_device_train_batch_size to 1 and
+  # keep gradient_accumulation_steps=8 to preserve the effective batch size.
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 4
+  num_train_epochs: 1
+  learning_rate: 0.0001        # SIM-CoT paper's 1e-4 with cosine decay.
+  max_grad_norm: 2.0            # SIM-CoT paper's value (vs V2's 1.0).
+  eval_strategy: "no"
+  save_strategy: steps
+  save_steps: 500
+  load_best_model_at_end: false
+  save_total_limit: 100
+  save_safetensors: true
+  weight_decay: 0.1
+  warmup_ratio: 0.03            # SIM-CoT paper's 0.03 (vs V2's 0.3).
+  lr_scheduler_type: cosine
+  report_to: []
+  dataloader_num_workers: 4
+  # Step budget matches our V2 headline (5299). If memory-pressed, reduce
+  # to 3000 as documented in the spec.
+  max_steps: 5299

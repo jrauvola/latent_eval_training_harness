@@ -9,6 +9,10 @@ from latent_harness.training.datasets import (
     make_standard_cot_data_module,
     make_supervised_data_module,
 )
+from latent_harness.training.sim_cot import (
+    SimCotLatentRuntime,
+    make_sim_cot_data_module,
+)
 
 RuntimeBuilder = Callable[..., LatentReasoningRuntime]
 DataModuleBuilder = Callable[..., dict[str, Any]]
@@ -82,8 +86,14 @@ METHOD_RECIPES: dict[str, MethodRecipe] = {
         summary="Supervise each latent reasoning step with an auxiliary decoder during training.",
         training_signal="step-level latent supervision via auxiliary decoder",
         inference_path="drop auxiliary decoder and keep latent inference path",
-        implemented=False,
-        validation_focus=["latent diversity", "auxiliary supervision stability"],
+        implemented=True,
+        runtime_builder=SimCotLatentRuntime,
+        data_module_builder=make_sim_cot_data_module,
+        validation_focus=[
+            "latent diversity",
+            "auxiliary supervision stability",
+            "aux decoder dropped on checkpoint save",
+        ],
     ),
     "colar": MethodRecipe(
         key="colar",
