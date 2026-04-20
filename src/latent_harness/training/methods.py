@@ -9,6 +9,8 @@ from latent_harness.training.datasets import (
     make_standard_cot_data_module,
     make_supervised_data_module,
 )
+from latent_harness.training.lt_tuning import LTTuningConfig, LTTuningRuntime
+from latent_harness.training.lt_tuning_data import make_lt_tuning_data_module
 
 RuntimeBuilder = Callable[..., LatentReasoningRuntime]
 DataModuleBuilder = Callable[..., dict[str, Any]]
@@ -84,6 +86,32 @@ METHOD_RECIPES: dict[str, MethodRecipe] = {
         inference_path="drop auxiliary decoder and keep latent inference path",
         implemented=False,
         validation_focus=["latent diversity", "auxiliary supervision stability"],
+    ),
+    "lt_tuning": MethodRecipe(
+        key="lt_tuning",
+        paper_name="LT-Tuning",
+        summary=(
+            "Latent-Thoughts Tuning: 3-stage curriculum (CoT warmup -> hidden-state"
+            " latent -> Context-Prediction Fusion) with confidence-triggered"
+            " <thinking> insertion."
+        ),
+        training_signal=(
+            "per-stage CE + hidden-state distillation; stage 2 blends hidden state"
+            " with top-p expected embedding (CPF)"
+        ),
+        inference_path=(
+            "latent rollout under the final stage's CPF fusion; <thinking>"
+            " positions receive the fused embedding"
+        ),
+        implemented=True,
+        training_style="lt_tuning",
+        runtime_builder=LTTuningRuntime,
+        data_module_builder=make_lt_tuning_data_module,
+        validation_focus=[
+            "CPF numerical correctness",
+            "curriculum stage transitions",
+            "confidence-triggered thinking-token insertion",
+        ],
     ),
     "colar": MethodRecipe(
         key="colar",

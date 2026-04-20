@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import logging
@@ -17,6 +18,15 @@ from latent_harness.core.io import ensure_dir, load_yaml_config
 from latent_harness.core.probes import maybe_init_probes
 from latent_harness.core.runtime import NumericalInstabilityError
 from latent_harness.training.config import TrainingConfig
+from latent_harness.training.lt_tuning import (
+    CurriculumScheduler,
+    LTTuningConfig,
+    LTTuningRuntime,
+)
+from latent_harness.training.lt_tuning_data import (
+    build_lt_tuning_dataset_for_stage,
+    collect_lt_tuning_examples,
+)
 from latent_harness.training.methods import get_method_recipe
 
 logger = logging.getLogger(__name__)
@@ -474,6 +484,198 @@ def _configure_training_logging() -> None:
     logger.setLevel(logging.INFO)
 
 
+def run_lt_tuning_training(
+    *,
+    config: TrainingConfig,
+    config_path: str,
+    runtime_model: LTTuningRuntime,
+    tokenizer: Any,
+    data_module: dict[str, Any],
+    training_args: Any,
+    payload: dict[str, Any],
+) -> None:
+    """Stage-aware training runner for the LT-Tuning recipe.
+
+    Runs the 3-stage curriculum sequentially. Between stages we:
+
+    1. Regenerate the training dataset with the stage's thinking-token
+       insertion strategy (stage 0 = no insertions; stage 2 optionally uses
+       the confidence-triggered strategy that requires a forward pass through
+       the current model).
+    2. Flip the runtime's stage mode and fusion_alpha.
+    3. Construct a fresh ``LatentTrainer`` for the stage with a stage-specific
+       ``num_train_epochs`` and ``learning_rate`` (by override into
+       ``training_args``). We deliberately recreate the trainer per stage so
+       that HF Trainer's internal step counter, LR scheduler, and callbacks
+       see a clean slate.
+
+    The final model state is persisted once all stages complete. The
+    registered thinking-token id is added to the tokenizer lazily once the
+    first latent stage is about to start.
+    """
+    lt_config = LTTuningConfig.from_dict(payload.get("lt_tuning") if payload else None)
+    # Rewire the runtime's lt_config to match the YAML (the generic
+    # runtime_builder couldn't pass this keyword so LTTuningRuntime was
+    # instantiated with defaults).
+    runtime_model.lt_config = lt_config
+    scheduler = CurriculumScheduler(lt_config)
+    stages = scheduler.stages()
+    logger.info(
+        "LT-Tuning curriculum stages=%s epochs=%s",
+        [s.name for s in stages],
+        [s.epochs for s in stages],
+    )
+
+    train_examples = data_module.get("_lt_tuning_train_examples")
+    eval_examples = data_module.get("_lt_tuning_eval_examples")
+    if train_examples is None:
+        # Happens if the data builder wasn't the lt_tuning-specific one.
+        # Fall back to a fresh collection pass.
+        train_examples, eval_examples = collect_lt_tuning_examples(
+            tokenizer=tokenizer,
+            data_config=config.data,
+            runtime_config=config.runtime,
+        )
+    logger.info(
+        "LT-Tuning formatted examples train=%d eval=%d",
+        len(train_examples),
+        len(eval_examples or []),
+    )
+
+    # Register the thinking token in the tokenizer and resize the model's
+    # embedding table. This mirrors the clone's run.py setup.
+    thinking_token = lt_config.thinking_token
+    if thinking_token in tokenizer.get_vocab():
+        thinking_token_id = tokenizer.convert_tokens_to_ids(thinking_token)
+        logger.info("Thinking token %r already in tokenizer vocab id=%d", thinking_token, thinking_token_id)
+    else:
+        added = tokenizer.add_tokens([thinking_token])
+        thinking_token_id = tokenizer.convert_tokens_to_ids(thinking_token)
+        logger.info(
+            "Added thinking token %r to tokenizer id=%d added_new=%d",
+            thinking_token,
+            thinking_token_id,
+            added,
+        )
+        # Resize the underlying transformer's embeddings. The LoRA-wrapped
+        # model still exposes ``resize_token_embeddings`` via the peft model's
+        # base model delegate.
+        base_for_resize = getattr(runtime_model.model, "resize_token_embeddings", None)
+        if base_for_resize is None:
+            base = runtime_model.model.get_base_model() if hasattr(runtime_model.model, "get_base_model") else runtime_model.model
+            base_for_resize = base.resize_token_embeddings
+        base_for_resize(len(tokenizer))
+        logger.info("Resized model embeddings to vocab size %d", len(tokenizer))
+    runtime_model.set_thinking_token_id(thinking_token_id)
+
+    output_root = Path(training_args.output_dir)
+    ensure_dir(output_root)
+
+    for stage_idx, stage in enumerate(stages):
+        if stage.epochs <= 0:
+            logger.info("Skipping stage=%s (epochs=0)", stage.name)
+            continue
+        logger.info(
+            "=== LT-Tuning stage=%s mode=%s epochs=%d lr=%.3e fusion_alpha=%.3f ===",
+            stage.name,
+            stage.mode,
+            stage.epochs,
+            stage.learning_rate,
+            stage.fusion_alpha,
+        )
+
+        # Build the stage-specific dataset. The confidence strategy needs the
+        # *current* base model for probability estimation.
+        base_model_for_confidence = runtime_model.model
+        train_dataset = build_lt_tuning_dataset_for_stage(
+            tokenizer=tokenizer,
+            examples=train_examples,
+            runtime_config=config.runtime,
+            bot_id=runtime_model.bot_id,
+            eot_id=runtime_model.eot_id,
+            thinking_token_id=thinking_token_id,
+            stage=stage,
+            lt_config=lt_config,
+            model_for_confidence=base_model_for_confidence,
+            seed=config.runtime.seed,
+            scheduled_stage_index=stage_idx,
+        )
+        eval_dataset = None
+        if eval_examples:
+            eval_dataset = build_lt_tuning_dataset_for_stage(
+                tokenizer=tokenizer,
+                examples=eval_examples,
+                runtime_config=config.runtime,
+                bot_id=runtime_model.bot_id,
+                eot_id=runtime_model.eot_id,
+                thinking_token_id=thinking_token_id,
+                stage=stage,
+                lt_config=lt_config,
+                model_for_confidence=base_model_for_confidence,
+                seed=config.runtime.seed,
+                scheduled_stage_index=stage_idx,
+            )
+
+        # Update runtime stage mode BEFORE training begins for this stage.
+        runtime_model.set_stage_mode(stage.mode, fusion_alpha=stage.fusion_alpha)
+
+        # Clone training_args for this stage so the cumulative output dir
+        # structure is preserved but per-stage overrides apply.
+        stage_args = copy.deepcopy(training_args)
+        stage_args.num_train_epochs = float(stage.epochs)
+        stage_args.learning_rate = float(stage.learning_rate)
+        stage_output_dir = str(output_root / f"stage_{stage_idx}_{stage.name}")
+        stage_args.output_dir = stage_output_dir
+        stage_args.logging_dir = stage_output_dir + "/logs"
+        ensure_dir(stage_output_dir)
+
+        from latent_harness.training.datasets import SupervisedLatentDataCollator
+
+        stage_trainer = LatentTrainer(
+            **_build_trainer_init_kwargs(
+                LatentTrainer,
+                model=runtime_model,
+                training_args=stage_args,
+                tokenizer=tokenizer,
+                data_module={
+                    "train_dataset": train_dataset,
+                    "eval_dataset": eval_dataset,
+                    "data_collator": SupervisedLatentDataCollator(tokenizer=tokenizer),
+                },
+            )
+        )
+        stage_trainer._record_event(
+            "lt_tuning_stage_start",
+            {
+                "config_path": config_path,
+                "stage_index": stage_idx,
+                "stage_name": stage.name,
+                "stage_mode": stage.mode,
+                "stage_epochs": stage.epochs,
+                "stage_lr": stage.learning_rate,
+                "fusion_alpha": stage.fusion_alpha,
+                "num_train_examples": len(train_dataset),
+            },
+        )
+        stage_trainer.train()
+        stage_trainer._record_event(
+            "lt_tuning_stage_end",
+            {
+                "stage_index": stage_idx,
+                "stage_name": stage.name,
+                "global_step": stage_trainer.state.global_step,
+            },
+        )
+        # Persist checkpoint for this stage.
+        atomic_save_state_dict(runtime_model, stage_output_dir)
+        tokenizer.save_pretrained(stage_output_dir)
+
+    # Persist final combined checkpoint at the top-level output_dir.
+    atomic_save_state_dict(runtime_model, str(output_root))
+    tokenizer.save_pretrained(str(output_root))
+    logger.info("Finished LT-Tuning curriculum; saved final checkpoint to %s", output_root)
+
+
 def run_training_from_config(config_path: str) -> None:
     _configure_training_logging()
     payload = load_yaml_config(config_path)
@@ -574,6 +776,18 @@ def run_training_from_config(config_path: str) -> None:
     if recipe.training_style == "standard_sft":
         model = StandardSFTModel(runtime_model)
         trainer_cls = StandardSFTTrainer
+    elif recipe.training_style == "lt_tuning":
+        # Stage-aware training runner lives in a dedicated helper below.
+        run_lt_tuning_training(
+            config=config,
+            config_path=config_path,
+            runtime_model=runtime_model,
+            tokenizer=tokenizer,
+            data_module=data_module,
+            training_args=training_args,
+            payload=payload,
+        )
+        return
     else:
         model = runtime_model
         trainer_cls = LatentTrainer

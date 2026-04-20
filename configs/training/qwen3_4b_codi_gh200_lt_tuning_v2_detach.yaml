@@ -1,0 +1,121 @@
+method: lt_tuning
+
+# Qwen3-4B LT-Tuning (Phase 2b of the SPAR latent-reasoning comparison).
+#
+# Deviations from the paper (Latent-Thoughts-Tuning, arxiv 2602.10229):
+#
+# - LoRA (r=128) instead of full-finetune. The paper uses full-finetune; we
+#   deviate for compute parity with the V2 headline. Flag in writeup.
+# - bf16 + V2 step-boundary detach + keep_last_2. The paper does not address
+#   the bf16 gradient-stability pathology; V2 is our minimum stable recipe.
+#   This isolates the CPF contribution from the detach contribution.
+# - Dataset mix is gsm8k_aug + numinamath_15, matching the rest of Phase 2.
+#
+# CPF hyperparameters (from Latent-Thoughts-Tuning/configs/example_config.yaml):
+#   fusion_top_p = 0.9
+#   fusion_temperature = 1.0
+#   per-stage fusion_alpha = [0.5, 0.5, 0.6]
+#   per-stage insertion_prob = [0.0, 0.85, 0.95]
+#   per-stage reinforce_prob_threshold = [0.0, 0.3, 0.2]
+#   hidden_state_layer_index = -1 (last layer; clone default)
+# Stage epochs {1, 1, 3} interpolated from paper Table 7 for 4B (see spec §4.2b).
+
+model:
+  base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+  hf_token:
+  lora_r: 128
+  lora_alpha: 32
+  lora_dropout: 0.1
+  lora_init: true
+  use_lora: true
+  full_precision: true
+  freeze_base_embeddings: false  # LT-Tuning adds a <thinking> token; must be trainable
+
+data:
+  dataset_names:
+    - gsm8k_aug
+  registry_ids:
+    - numinamath_15
+  registry_path: configs/datasets/full_registry.yaml
+  cache_dir: .cache/huggingface
+  max_samples_per_dataset: 8192
+  include_last_cot: false
+  answer_only: false
+  max_token_num: 768
+  validation_split_ratio: 0.05
+  validation_max_samples: 2048
+
+runtime:
+  model_max_length: 768
+  num_latent: 4
+  # V2 step-boundary detach + keep_last_2 (the minimum stable bf16 recipe).
+  detach_latent_between_steps: true
+  detach_cache_between_steps: true
+  detach_keep_last_k: 2
+  detach_position_mode: all
+  use_prj: true
+  prj_dim: 2048
+  prj_dropout: 0.0
+  prj_no_ln: false
+  prj_fp32: true
+  prj_residual_gated: true
+  prj_gate_init: 0.0
+  distill_loss_div_std: true
+  distill_loss_std_floor: 0.001
+  distill_loss_type: smooth_l1
+  distill_loss_factor: 5.0
+  ref_loss_factor: 0.0
+  remove_eos: true
+  bf16: true
+  fp32: false
+  seed: 11
+  use_chat_template: true
+  chat_template_kwargs:
+    enable_thinking: false
+
+lt_tuning:
+  thinking_token: "<thinking>"
+  thinking_strategy: confidence
+  hidden_state_layer_index: -1
+  fusion_top_p: 0.9
+  fusion_temperature: 1.0
+  stage_names:
+    - stage0-cot
+    - stage1-hidden
+    - stage2-fusion
+  stage_modes:
+    - explicit
+    - hidden_state
+    - soft_fusion
+  stage_epochs: [1, 1, 3]
+  stage_learning_rates: [0.00002, 0.00002, 0.00002]
+  stage_fusion_alphas: [0.5, 0.5, 0.6]
+  stage_insertion_probs: [0.0, 0.85, 0.95]
+  stage_secondary_insertion_probs: [0.0, 0.15, 0.2]
+  stage_reinforce_prob_thresholds: [0.0, 0.3, 0.2]
+  stage_tokens_per_stage: [0, 1, 1]
+  reinforce_max_eval_length: 2048
+  regenerate_dataset_per_stage: true
+
+trainer:
+  output_dir: artifacts/train/qwen3_4b_codi_gh200_lt_tuning_v2_detach
+  logging_dir: artifacts/train/qwen3_4b_codi_gh200_lt_tuning_v2_detach/logs
+  logging_steps: 1
+  logging_nan_inf_filter: false
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 4
+  num_train_epochs: 1  # per-stage override; actual total = sum(stage_epochs)
+  learning_rate: 0.00002  # per-stage override
+  max_grad_norm: 1.0
+  eval_strategy: "no"
+  save_strategy: steps
+  save_steps: 500
+  load_best_model_at_end: false
+  save_total_limit: 100
+  save_safetensors: true
+  weight_decay: 0.1
+  warmup_ratio: 0.3
+  lr_scheduler_type: cosine
+  report_to: []
+  dataloader_num_workers: 4
