@@ -52,12 +52,20 @@ def _should_log_batch_progress(
     return interval_batches > 0 and batch_index % interval_batches == 0
 
 
-def _pretokenize_examples(runtime_config, tokenizer, examples: list[BenchmarkExample]) -> dict[str, Any]:
+def _pretokenize_examples(
+    runtime_config,
+    tokenizer,
+    examples: list[BenchmarkExample],
+    *,
+    prompt_suffix: str = "",
+) -> dict[str, Any]:
     use_chat = getattr(runtime_config, "use_chat_template", False)
     chat_kw = getattr(runtime_config, "chat_template_kwargs", None) or {}
     prompts: list[str] = []
     for example in examples:
         prompt = example.prompt
+        if prompt_suffix:
+            prompt = f"{prompt}{prompt_suffix}"
         if use_chat and getattr(tokenizer, "chat_template", None):
             messages = [{"role": "user", "content": prompt}]
             try:
@@ -340,7 +348,12 @@ def _run_single_evaluation(
 
     mode_started = time.perf_counter()
     examples = loaded_benchmark.examples
-    prepared_inputs = _pretokenize_examples(loaded_model.runtime_config, loaded_model.tokenizer, examples)
+    prepared_inputs = _pretokenize_examples(
+        loaded_model.runtime_config,
+        loaded_model.tokenizer,
+        examples,
+        prompt_suffix=getattr(runtime, "prompt_suffix", "") or "",
+    )
 
     total_batches = _num_batches(len(examples), runtime.batch_size)
     latencies: list[float] = []

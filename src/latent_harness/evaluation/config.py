@@ -50,6 +50,11 @@ class EvaluationRuntimeConfig:
     #: feedback_batch_eval_persistence.md — crashes must lose <= this many examples.
     persistence_every_examples: int = 32
     seed: int = 11
+    #: Optional suffix appended to each example's ``prompt`` *before* chat-template
+    #: wrapping. Used for zero-shot CoT baselines that need e.g. "\n\nLet's think
+    #: step by step." appended to the raw question. Default "" preserves legacy
+    #: behavior. See spec §7a.B / §7b Phase 1a.
+    prompt_suffix: str = ""
 
 
 InferenceStrategy = Literal["latent_cot", "standard_generation"]

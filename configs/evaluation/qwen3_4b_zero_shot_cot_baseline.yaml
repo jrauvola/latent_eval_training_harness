@@ -1,0 +1,100 @@
+# Phase 1a — Zero-shot CoT baseline on raw Qwen3-4B-Instruct-2507 (no CODI, no LoRA).
+#
+# Spec: docs/superpowers/specs/2026-04-19-qwen3-eval-and-comparison-pipeline-design.md
+#       §7a.B (motivation), §7b Phase 1a (scope).
+#
+# Purpose: establish the FLOOR that our CODI fine-tuned variants must beat. If
+# the floor is >= our Phase 1 numbers (Q-P0 GSM8k ~0.13), the capability story is
+# upside-down and the narrative must pivot.
+#
+# Configuration choices:
+#   - Model: Qwen/Qwen3-4B-Instruct-2507 base weights, no adapter, no CODI runtime.
+#     Loaded via `checkpoint_type: base_model` + `model_kind: causal_lm` +
+#     `inference_strategy: standard_generation` — this bypasses LatentReasoningRuntime
+#     entirely, so `skip_latent_injection_at_zero` is a no-op here (the latent
+#     injection path is never taken). We set it TRUE anyway for consistency.
+#   - Prompt template: "{question}\n\nLet's think step by step." (the classic zero-shot
+#     CoT trigger; applied via the new `prompt_suffix` runtime field BEFORE the chat
+#     template so the suffix becomes part of the user turn).
+#   - Chat template: Qwen3 Instruct-2507 is a chat model; apply the user-role chat
+#     template with `enable_thinking: false` (Instruct-2507 is the non-thinking variant,
+#     matching how our CODI fine-tunes were trained/evaluated).
+#   - Decode: greedy (spec), max_new_tokens=512 (spec — more headroom than Phase 1's
+#     256 because zero-shot CoT rationale is verbose).
+#   - Answer extraction: uses the same `normalize_numeric` regex as Phase 1
+#     (`NUMERIC_PATTERN` picks the LAST number in the decoded string). Directly
+#     comparable with our CODI numbers.
+#   - Batch size: 4 matches Phase 1 for fair wall-time comparison, and keeps VRAM
+#     within the ~20 GB headroom we have on the shared GH200 alongside Phase 1.
+#
+# Forward-pass only; shares the GH200 with the running Phase 1 eval (71+ GB free
+# of 97 GB at launch time, Phase 1 ~27% util).
+
+runtime:
+  output_dir: research_findings/eval/qwen3_4b_zero_shot_cot
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 4
+  progress_log_interval_batches: 10
+  max_examples_per_benchmark: null
+  max_new_tokens: 512
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+  # No CODI sweep here — single forward-pass baseline. Leaving num_latent_sweep
+  # unset (null) makes the runner fall back to the spec's `runtime.num_latent`
+  # value, which we set to 0. skip_latent_injection_at_zero is a no-op for the
+  # standard_generation path but we set it TRUE for self-documentation.
+  num_latent_sweep: null
+  skip_latent_injection_at_zero: true
+  dump_latent_traces: false
+  dump_kv_cache: false
+
+  # Batch-level persistence — flush after every batch (4 examples).
+  persistence_every_examples: 4
+  seed: 11
+
+  # NEW field (see src/latent_harness/evaluation/config.py): string suffix
+  # appended to each raw prompt BEFORE chat-template wrapping. This is how we
+  # inject the zero-shot CoT trigger without touching benchmark loaders.
+  prompt_suffix: "\n\nLet's think step by step."
+
+benchmarks:
+  - gsm8k
+  - gsm-hard
+  - svamp
+
+models:
+  - name: qwen3_4b_instruct_2507_zero_shot_cot
+    # `base_model` + empty `checkpoint_source` → load raw base weights, no adapter,
+    # no state_dict overlay. Falls through to the plain HF `from_pretrained` path
+    # in _load_standard_generation_model.
+    checkpoint_source:
+    checkpoint_type: base_model
+    model_kind: causal_lm
+    inference_strategy: standard_generation
+    model:
+      base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+      use_lora: false
+      full_precision: true
+      freeze_base_embeddings: true
+    runtime:
+      model_max_length: 2048
+      # num_latent is inert on the standard_generation path but populated for
+      # validation symmetry.
+      num_latent: 0
+      use_prj: false
+      # bf16 for forward-pass inference; Qwen3-4B-Instruct-2507 is shipped in
+      # bf16 and that's what the model card recommends.
+      bf16: true
+      fp32: false
+      remove_eos: false
+      seed: 11
+      use_chat_template: true
+      chat_template_kwargs:
+        # Instruct-2507 is the NON-thinking variant; this matches how the CODI
+        # fine-tunes (Q-P0, Q-V2, …) are evaluated in qwen3_4b_codi_phase1_full.yaml.
+        enable_thinking: false
