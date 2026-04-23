@@ -119,6 +119,149 @@ def project_hidden_to_topk(
     return batch_rows
 
 
+def _crop_cache(cache: Any, max_length: int) -> Any:
+    """Crop a KV cache to ``max_length`` along the sequence axis.
+
+    Supports transformers' ``DynamicCache`` (via its built-in ``crop``) and
+    legacy tuple-of-tuples caches (returns a new tuple with sliced tensors).
+    """
+    try:
+        from transformers.cache_utils import DynamicCache
+    except ImportError:
+        DynamicCache = None
+
+    if DynamicCache is not None and isinstance(cache, DynamicCache):
+        cache.crop(max_length)
+        return cache
+    if isinstance(cache, (list, tuple)):
+        new_layers = []
+        for layer in cache:
+            if isinstance(layer, (list, tuple)) and len(layer) >= 2:
+                k, v = layer[0], layer[1]
+                new_k = k[:, :, :max_length, :]
+                new_v = v[:, :, :max_length, :]
+                new_layers.append((new_k, new_v))
+            else:
+                new_layers.append(layer)
+        return tuple(new_layers)
+    raise TypeError(f"Unsupported cache type for crop: {type(cache).__name__}")
+
+
+def _perturb_latent_kv(
+    cache: Any,
+    *,
+    encoder_prefix_length: int,
+    num_latent: int,
+    noise_sigma_mult: float,
+    generator: torch.Generator | None = None,
+) -> None:
+    """Add Gaussian noise (std = ``noise_sigma_mult * std(latent_kv_slice)``) to
+    the latent-position slice of every layer's K and V tensors. In-place.
+
+    ``num_latent`` is the number of latent positions at the end of the seq axis.
+    """
+    if num_latent <= 0:
+        return
+
+    try:
+        from transformers.cache_utils import DynamicCache
+    except ImportError:
+        DynamicCache = None
+
+    if DynamicCache is not None and isinstance(cache, DynamicCache):
+        layer_kvs = [(layer.keys, layer.values) for layer in cache.layers]
+    elif isinstance(cache, (list, tuple)):
+        layer_kvs = [(layer[0], layer[1]) for layer in cache]
+    else:
+        raise TypeError(f"Unsupported cache type for perturb: {type(cache).__name__}")
+
+    for k, v in layer_kvs:
+        seq_len = k.shape[-2]
+        if seq_len < num_latent:
+            continue
+        lat_start = seq_len - num_latent
+        k_slice = k[:, :, lat_start:lat_start + num_latent, :]
+        v_slice = v[:, :, lat_start:lat_start + num_latent, :]
+        k_std = float(k_slice.detach().float().std())
+        v_std = float(v_slice.detach().float().std())
+        noise_k = torch.randn(
+            k_slice.shape, device=k.device, dtype=k.dtype, generator=generator
+        ) * (noise_sigma_mult * k_std)
+        noise_v = torch.randn(
+            v_slice.shape, device=v.device, dtype=v.dtype, generator=generator
+        ) * (noise_sigma_mult * v_std)
+        k[:, :, lat_start:lat_start + num_latent, :] = k_slice + noise_k
+        v[:, :, lat_start:lat_start + num_latent, :] = v_slice + noise_v
+
+
+def capture_latent_kv_slice(
+    cache: Any,
+    *,
+    encoder_prefix_length: int,
+    num_latent: int,
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Extract (k, v) slices for the latent positions of every layer.
+
+    Returns a list of (k_slice, v_slice) per layer; each tensor has shape
+    ``[batch, num_heads, num_latent, head_dim]`` (whatever the cache's native
+    axis order is — same as cache storage). Tensors are .clone().detach().
+    """
+    try:
+        from transformers.cache_utils import DynamicCache
+    except ImportError:
+        DynamicCache = None
+
+    if DynamicCache is not None and isinstance(cache, DynamicCache):
+        layer_kvs = [(layer.keys, layer.values) for layer in cache.layers]
+    elif isinstance(cache, (list, tuple)):
+        layer_kvs = [(layer[0], layer[1]) for layer in cache]
+    else:
+        raise TypeError(f"Unsupported cache type for capture: {type(cache).__name__}")
+
+    out: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for k, v in layer_kvs:
+        seq_len = k.shape[-2]
+        lat_start = seq_len - num_latent
+        k_slice = k[:, :, lat_start:lat_start + num_latent, :].clone().detach()
+        v_slice = v[:, :, lat_start:lat_start + num_latent, :].clone().detach()
+        out.append((k_slice, v_slice))
+    return out
+
+
+def inject_latent_kv_slice(
+    cache: Any,
+    slices: list[tuple[torch.Tensor, torch.Tensor]],
+    *,
+    num_latent: int,
+) -> None:
+    """In-place overwrite the last ``num_latent`` positions of every layer's
+    K and V with slices from ``slices`` (output of :func:`capture_latent_kv_slice`)."""
+    if num_latent <= 0:
+        return
+
+    try:
+        from transformers.cache_utils import DynamicCache
+    except ImportError:
+        DynamicCache = None
+
+    if DynamicCache is not None and isinstance(cache, DynamicCache):
+        layer_kvs = [(layer.keys, layer.values) for layer in cache.layers]
+    elif isinstance(cache, (list, tuple)):
+        layer_kvs = [(layer[0], layer[1]) for layer in cache]
+    else:
+        raise TypeError(f"Unsupported cache type for inject: {type(cache).__name__}")
+
+    if len(slices) != len(layer_kvs):
+        raise ValueError(
+            f"Injection slice count ({len(slices)}) != cache layer count ({len(layer_kvs)})"
+        )
+    for (k, v), (sk, sv) in zip(layer_kvs, slices):
+        seq_len = k.shape[-2]
+        lat_start = seq_len - num_latent
+        k[:, :, lat_start:lat_start + num_latent, :] = sk.to(device=k.device, dtype=k.dtype)
+        v[:, :, lat_start:lat_start + num_latent, :] = sv.to(device=v.device, dtype=v.dtype)
+
+
 def generate_from_latent_with_taps(
     runtime: Any,
     *,
@@ -133,6 +276,10 @@ def generate_from_latent_with_taps(
     top_p: float,
     skip_latent_injection: bool = False,
     capture_latent_hidden: bool = True,
+    ablate_latent_kv_before_answer: bool = False,
+    perturb_latent_kv_sigma_mult: float | None = None,
+    perturb_seed: int | None = None,
+    inject_latent_kv_slices: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
 ) -> GenerationWithTaps:
     """Run latent generation and capture per-step hidden states + final cache.
 
@@ -143,6 +290,17 @@ def generate_from_latent_with_taps(
     When ``skip_latent_injection`` is True or ``inf_latent_iterations == 0``,
     the latent rollout is skipped entirely and generation proceeds directly
     from the encoder output — this is the "zero-latent ablation" path.
+
+    Additional F-test hooks (applied right after the latent rollout, before
+    the answer-emission loop):
+
+    - ``ablate_latent_kv_before_answer`` (F4): drops all latent-position KV
+      entries from the cache, so the answer loop only attends to the encoder.
+    - ``perturb_latent_kv_sigma_mult`` (F6): adds Gaussian noise of magnitude
+      ``sigma * std(latent_kv_slice)`` to the latent-position KV entries.
+    - ``inject_latent_kv_slices`` (F5): replaces the latent-position KV
+      entries with externally-provided tensors (e.g. captured from a different
+      example's forward pass).
     """
 
     device = input_ids.device
@@ -171,6 +329,36 @@ def generate_from_latent_with_taps(
                 )
             )
         latent = runtime.maybe_project(final_hidden)
+
+    # F4 hook: drop latent-position KV entries before answer emission.
+    if ablate_latent_kv_before_answer and effective_iterations > 0:
+        past_key_values = _crop_cache(past_key_values, encoder_prefix_length)
+
+    # F5 hook: overwrite latent-position KV with externally-provided slices.
+    if inject_latent_kv_slices is not None and effective_iterations > 0:
+        inject_latent_kv_slice(
+            past_key_values,
+            inject_latent_kv_slices,
+            num_latent=effective_iterations,
+        )
+
+    # F6 hook: add Gaussian noise to latent-position KV entries.
+    if (
+        perturb_latent_kv_sigma_mult is not None
+        and perturb_latent_kv_sigma_mult > 0.0
+        and effective_iterations > 0
+    ):
+        gen = None
+        if perturb_seed is not None:
+            gen = torch.Generator(device=input_ids.device)
+            gen.manual_seed(int(perturb_seed))
+        _perturb_latent_kv(
+            past_key_values,
+            encoder_prefix_length=encoder_prefix_length,
+            num_latent=effective_iterations,
+            noise_sigma_mult=float(perturb_latent_kv_sigma_mult),
+            generator=gen,
+        )
 
     # From this point forward: reproduce the stock generation loop.
     next_embeds = runtime.build_eot_embeds(
