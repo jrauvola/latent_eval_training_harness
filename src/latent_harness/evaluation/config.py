@@ -55,6 +55,12 @@ class EvaluationRuntimeConfig:
     #: step by step." appended to the raw question. Default "" preserves legacy
     #: behavior. See spec §7a.B / §7b Phase 1a.
     prompt_suffix: str = ""
+    #: F4 inert-latent probe: run the latent rollout normally (populating the
+    #: KV cache with ``num_latent`` entries beyond the encoder prefix) but slice
+    #: those latent KV entries away before the answer generation loop starts.
+    #: If accuracy is unchanged, the latents contribute nothing to the final
+    #: answer — see research_findings/experiment_scratchpad F4.
+    ablate_latent_kv_before_answer: bool = False
 
 
 InferenceStrategy = Literal["latent_cot", "standard_generation"]

@@ -191,6 +191,9 @@ def _generate_predictions_with_taps(
                 top_p=config.top_p,
                 skip_latent_injection=skip_latent_injection,
                 capture_latent_hidden=capture_hidden,
+                ablate_latent_kv_before_answer=getattr(
+                    config, "ablate_latent_kv_before_answer", False
+                ),
             )
         return taps.predictions, taps
 

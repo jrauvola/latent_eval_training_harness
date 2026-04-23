@@ -119,6 +119,43 @@ def project_hidden_to_topk(
     return batch_rows
 
 
+def _ablate_latent_kv(past_key_values: Any, encoder_prefix_length: int) -> Any:
+    """Trim the KV cache so only encoder-prefix entries remain.
+
+    F4 ablation: after the latent rollout has populated ``num_latent`` entries
+    beyond the encoder prefix, this helper removes those latent entries so the
+    final-answer generation loop cannot attend to them. Works for both
+    ``DynamicCache`` (uses the public ``crop`` API) and legacy tuple-of-tuples
+    caches (manual slice on the seq_len axis of each layer's K and V tensors).
+    """
+
+    try:
+        from transformers.cache_utils import Cache  # type: ignore
+    except ImportError:  # pragma: no cover — transformers always present here.
+        Cache = None  # type: ignore
+
+    if Cache is not None and isinstance(past_key_values, Cache):
+        # Public API handles both DynamicCache and most of its subclasses.
+        past_key_values.crop(encoder_prefix_length)
+        return past_key_values
+
+    if isinstance(past_key_values, (tuple, list)):
+        trimmed: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for layer_kv in past_key_values:
+            if not (isinstance(layer_kv, (tuple, list)) and len(layer_kv) >= 2):
+                raise TypeError(
+                    f"Unexpected layer entry in tuple cache: {type(layer_kv).__name__}"
+                )
+            k = layer_kv[0][..., :encoder_prefix_length, :]
+            v = layer_kv[1][..., :encoder_prefix_length, :]
+            trimmed.append((k, v))
+        return tuple(trimmed)
+
+    raise TypeError(
+        f"Unsupported cache type for latent-KV ablation: {type(past_key_values).__name__}"
+    )
+
+
 def generate_from_latent_with_taps(
     runtime: Any,
     *,
@@ -133,6 +170,7 @@ def generate_from_latent_with_taps(
     top_p: float,
     skip_latent_injection: bool = False,
     capture_latent_hidden: bool = True,
+    ablate_latent_kv_before_answer: bool = False,
 ) -> GenerationWithTaps:
     """Run latent generation and capture per-step hidden states + final cache.
 
@@ -143,6 +181,11 @@ def generate_from_latent_with_taps(
     When ``skip_latent_injection`` is True or ``inf_latent_iterations == 0``,
     the latent rollout is skipped entirely and generation proceeds directly
     from the encoder output — this is the "zero-latent ablation" path.
+
+    When ``ablate_latent_kv_before_answer`` is True, the latent rollout still
+    runs normally (so any non-KV side effects are preserved) but the latent
+    KV-cache entries are removed before the final-answer generation loop
+    starts — the F4 inert-latent probe.
     """
 
     device = input_ids.device
@@ -171,6 +214,10 @@ def generate_from_latent_with_taps(
                 )
             )
         latent = runtime.maybe_project(final_hidden)
+
+    # F4: drop the latent entries from the KV cache before answer generation.
+    if ablate_latent_kv_before_answer and effective_iterations > 0:
+        past_key_values = _ablate_latent_kv(past_key_values, encoder_prefix_length)
 
     # From this point forward: reproduce the stock generation loop.
     next_embeds = runtime.build_eot_embeds(
