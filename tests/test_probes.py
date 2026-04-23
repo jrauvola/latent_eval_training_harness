@@ -486,3 +486,347 @@ def test_maybe_init_probes_returns_none_when_chain_has_no_layers(tmp_path):
         LatentRuntimeConfig(probe_mode=True, probe_output_dir=str(tmp_path)),
     )
     assert probes is None
+
+
+# ---------- PerModuleGradProbe tests (Phase 1.6) --------------------------------
+#
+# Builds a tiny fake model whose parameter names mirror the PEFT-LoRA layout
+# HuggingFace produces for Qwen3/Gemma-3. We then verify the probe:
+#   1. discovers the expected parameter names (q/k/v/o × lora_A/B × layer 0 + spots)
+#   2. reads param.grad and writes nonzero finite values to the CSV
+#   3. produces the correct column schema
+#   4. is gated by the enable_per_module_grad_probe config flag
+#   5. captures via on_pre_optimizer_step (not on_step_end, where grads are zeroed)
+
+
+def _make_fake_peft_lora_model(
+    num_layers: int = 36, hidden: int = 8, lora_r: int = 4
+) -> torch.nn.Module:
+    """Build a toy model whose named_parameters match ``.layers.N.self_attn.
+    <proj>_proj.lora_<A|B>.default.weight`` — the PEFT-LoRA pattern.
+    """
+    class LoraLinear(torch.nn.Module):
+        """Mimics peft.tuners.lora.Linear: base + lora_A[default] + lora_B[default]."""
+        def __init__(self, in_features: int, out_features: int, r: int):
+            super().__init__()
+            self.base_layer = torch.nn.Linear(in_features, out_features, bias=False)
+            self.lora_A = torch.nn.ModuleDict({
+                "default": torch.nn.Linear(in_features, r, bias=False),
+            })
+            self.lora_B = torch.nn.ModuleDict({
+                "default": torch.nn.Linear(r, out_features, bias=False),
+            })
+
+        def forward(self, x):
+            return self.base_layer(x) + self.lora_B["default"](self.lora_A["default"](x))
+
+    class SelfAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = LoraLinear(hidden, hidden, lora_r)
+            self.k_proj = LoraLinear(hidden, hidden, lora_r)
+            self.v_proj = LoraLinear(hidden, hidden, lora_r)
+            self.o_proj = LoraLinear(hidden, hidden, lora_r)
+
+        def forward(self, x):
+            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
+
+    class Block(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = SelfAttn()
+
+        def forward(self, x):
+            return self.self_attn(x) + x
+
+    class InnerModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([Block() for _ in range(num_layers)])
+
+        def forward(self, x):
+            for layer in self.layers:
+                x = layer(x)
+            return x
+
+    # Mirror PEFT wrapper depth: top.model.model.layers
+    class MidWrap(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = InnerModel()
+
+        def forward(self, x):
+            return self.model(x)
+
+    class Top(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = MidWrap()
+
+        def forward(self, x):
+            return self.model(x)
+
+    return Top()
+
+
+def test_per_module_grad_probe_discovers_expected_lora_params(tmp_path):
+    """Probe should find all 8 LoRA A/B weights at layer 0 + spot layers."""
+    from latent_harness.core.probes import PerModuleGradProbe
+
+    model = _make_fake_peft_lora_model(num_layers=36)
+    probe = PerModuleGradProbe(
+        output_path=tmp_path / "per_module_grad.csv",
+        layer_indices=[0, 1, 5, 10, 20, 35],
+    )
+    probe.attach(model)
+
+    # 6 layers × 8 submodules (q/k/v/o × lora_A/lora_B) = 48 targets.
+    assert len(probe._targets) == 48, (
+        f"expected 48 (6 layers × 8 LoRA weights), got {len(probe._targets)}; "
+        f"first few: {probe._targets[:4]}"
+    )
+    # Verify an expected name is present with the correct PEFT layout.
+    names = {t[0] for t in probe._targets}
+    expected_layer0 = {
+        f"model.model.layers.0.self_attn.q_proj.lora_A.default.weight",
+        f"model.model.layers.0.self_attn.q_proj.lora_B.default.weight",
+        f"model.model.layers.0.self_attn.k_proj.lora_A.default.weight",
+        f"model.model.layers.0.self_attn.o_proj.lora_B.default.weight",
+    }
+    assert expected_layer0.issubset(names), (
+        f"missing expected LoRA names. Got: {sorted(names)[:8]}"
+    )
+
+
+def test_per_module_grad_probe_captures_nonzero_grad(tmp_path):
+    """After backward, param.grad is nonzero; probe writes finite values."""
+    import csv as _csv
+    import math
+
+    from latent_harness.core.probes import PerModuleGradProbe
+
+    model = _make_fake_peft_lora_model(num_layers=2)
+    # Restrict to layer 0 for a simple assertion.
+    probe = PerModuleGradProbe(
+        output_path=tmp_path / "per_module_grad.csv",
+        layer_indices=[0],
+    )
+    probe.attach(model)
+
+    x = torch.randn(2, 8, requires_grad=False)
+    out = model(x)
+    loss = out.sum()
+    loss.backward()
+
+    probe.capture(step=7)
+
+    with (tmp_path / "per_module_grad.csv").open() as f:
+        rows = list(_csv.DictReader(f))
+    assert len(rows) == 8, f"expected 8 rows for layer 0, got {len(rows)}"
+    for row in rows:
+        assert row["step"] == "7"
+        assert row["layer_idx"] == "0"
+        assert row["submodule"].endswith("lora_A") or row["submodule"].endswith("lora_B")
+        max_abs = float(row["max_abs_grad"])
+        mean_abs = float(row["mean_abs_grad"])
+        assert math.isfinite(max_abs), f"non-finite max_abs_grad for {row['module_name']}"
+        assert math.isfinite(mean_abs)
+        assert max_abs >= 0.0
+        assert mean_abs >= 0.0
+        # At least one row must be strictly > 0 (else probe is broken).
+    assert any(float(r["max_abs_grad"]) > 0.0 for r in rows), (
+        "all captured gradients were zero — probe failed to read param.grad"
+    )
+
+
+def test_per_module_grad_probe_csv_schema(tmp_path):
+    """CSV header must match the documented columns."""
+    from latent_harness.core.probes import PerModuleGradProbe
+
+    model = _make_fake_peft_lora_model(num_layers=1)
+    probe = PerModuleGradProbe(
+        output_path=tmp_path / "per_module_grad.csv",
+        layer_indices=[0],
+    )
+    probe.attach(model)
+    # Force grads populated
+    loss = model(torch.randn(2, 8)).sum()
+    loss.backward()
+    probe.capture(step=0)
+
+    content = (tmp_path / "per_module_grad.csv").read_text()
+    header_line = content.splitlines()[0]
+    assert header_line == "step,module_name,layer_idx,submodule,max_abs_grad,mean_abs_grad"
+
+
+def test_per_module_grad_probe_handles_missing_grad_gracefully(tmp_path):
+    """If .grad is None (e.g. no backward yet), capture writes NaN without error."""
+    import csv as _csv
+    import math
+
+    from latent_harness.core.probes import PerModuleGradProbe
+
+    model = _make_fake_peft_lora_model(num_layers=1)
+    probe = PerModuleGradProbe(
+        output_path=tmp_path / "per_module_grad.csv",
+        layer_indices=[0],
+    )
+    probe.attach(model)
+    # Do NOT call backward — all params have grad=None.
+    probe.capture(step=0)
+
+    with (tmp_path / "per_module_grad.csv").open() as f:
+        rows = list(_csv.DictReader(f))
+    assert len(rows) == 8
+    for row in rows:
+        assert math.isnan(float(row["max_abs_grad"]))
+        assert math.isnan(float(row["mean_abs_grad"]))
+
+
+def test_per_module_grad_probe_warns_when_no_lora_params_match(tmp_path, caplog):
+    """If the model has no params matching the LoRA pattern, log a warning
+    with a discovery dump rather than failing silently."""
+    from latent_harness.core.probes import PerModuleGradProbe
+
+    class BareNoLora(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc = torch.nn.Linear(8, 8)
+
+    probe = PerModuleGradProbe(output_path=tmp_path / "per_module_grad.csv")
+    with caplog.at_level("WARNING", logger="latent_harness.core.probes"):
+        probe.attach(BareNoLora(), layer_indices=[0])
+    assert any(
+        "no LoRA A/B parameters matched" in rec.message for rec in caplog.records
+    ), f"expected warning about missing LoRA params. Got: {[r.message for r in caplog.records]}"
+
+
+def test_maybe_init_probes_attaches_per_module_when_enabled(tmp_path):
+    """enable_per_module_grad_probe=True → ``per_module`` key populated."""
+    from latent_harness.core.config import LatentRuntimeConfig
+    from latent_harness.core.probes import maybe_init_probes
+
+    class FakeQwen3Model(torch.nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.layers = inner.model.model.layers
+
+    # Reuse the fake PEFT-LoRA model and splice its layers under a Qwen3-style
+    # wrapper the walker can locate.
+    model_with_lora = _make_fake_peft_lora_model(num_layers=4)
+    fake_qwen3 = FakeQwen3Model(model_with_lora)
+
+    class FakeRuntime(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            # Reuse the LoRA-bearing wrapper for named_parameters coverage,
+            # and separately expose a ``.layers`` path so the walker finds it.
+            self._lora_model = model_with_lora
+            self._qwen3 = fake_qwen3
+
+        @property
+        def layers(self):
+            return self._qwen3.layers
+
+        def named_parameters(self, *args, **kwargs):
+            # Delegate to the LoRA-bearing model so PerModuleGradProbe discovers
+            # params under the PEFT layout (``.layers.N.self_attn.<proj>.lora_*``).
+            return self._lora_model.named_parameters(*args, **kwargs)
+
+    cfg = LatentRuntimeConfig(
+        probe_mode=True,
+        probe_output_dir=str(tmp_path),
+        enable_per_module_grad_probe=True,
+    )
+    probes = maybe_init_probes(FakeRuntime(), cfg)
+    assert probes is not None
+    assert probes.get("per_module") is not None
+    assert len(probes["per_module"]._targets) > 0, (
+        "PerModuleGradProbe attached but discovered zero LoRA params"
+    )
+    probes["dgrad"].detach_all()
+    probes["per_module"].detach_all()
+
+
+def test_maybe_init_probes_skips_per_module_when_disabled(tmp_path):
+    """enable_per_module_grad_probe default (False) → ``per_module`` key None."""
+    from latent_harness.core.config import LatentRuntimeConfig
+    from latent_harness.core.probes import maybe_init_probes
+
+    layers = _make_toy_layers()
+
+    class FakeRuntime(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = layers
+
+    cfg = LatentRuntimeConfig(probe_mode=True, probe_output_dir=str(tmp_path))
+    probes = maybe_init_probes(FakeRuntime(), cfg)
+    assert probes is not None
+    assert probes.get("per_module") is None
+    probes["dgrad"].detach_all()
+
+
+def test_per_module_grad_probe_config_requires_probe_mode():
+    """enable_per_module_grad_probe=True without probe_mode=True should raise."""
+    import pytest
+
+    from latent_harness.core.config import LatentRuntimeConfig
+
+    with pytest.raises(ValueError, match="requires probe_mode=True"):
+        LatentRuntimeConfig(enable_per_module_grad_probe=True)
+
+
+def test_probe_callback_captures_per_module_at_pre_optimizer_step(tmp_path, monkeypatch):
+    """ProbeCallback must capture per-module grad in on_pre_optimizer_step,
+    NOT on_step_end (where HF has already zeroed grads).
+    """
+    from latent_harness.training.trainer import ProbeCallback
+    from latent_harness.core.config import LatentRuntimeConfig
+
+    call_log = {"capture_steps": [], "flush_steps": []}
+
+    class FakeDgrad:
+        def flush(self, step):
+            call_log["flush_steps"].append(step)
+        def detach_all(self):
+            pass
+
+    class FakePerModule:
+        def capture(self, step):
+            call_log["capture_steps"].append(step)
+        def detach_all(self):
+            pass
+
+    def fake_init(model, runtime_config):
+        return {"dgrad": FakeDgrad(), "rmsnorm": None, "per_module": FakePerModule()}
+
+    monkeypatch.setattr("latent_harness.training.trainer.maybe_init_probes", fake_init)
+
+    runtime_cfg = LatentRuntimeConfig(
+        probe_mode=True,
+        probe_output_dir=str(tmp_path),
+        enable_per_module_grad_probe=True,
+    )
+    cb = ProbeCallback(runtime_config=runtime_cfg)
+
+    class _State:
+        global_step = 4
+
+    cb.on_train_begin(args=None, state=_State(), control=None, model=None)
+    # HF Trainer order: on_pre_optimizer_step (grad live) → optimizer.step →
+    # zero_grad → on_step_end (state.global_step now incremented to 5).
+    cb.on_pre_optimizer_step(args=None, state=_State(), control=None)
+    _State.global_step = 5  # simulate HF's internal increment
+    cb.on_step_end(args=None, state=_State(), control=None)
+    cb.on_train_end(args=None, state=_State(), control=None)
+
+    # Per-module should capture from on_pre_optimizer_step, at state.global_step + 1
+    # (so the column aligns with DgradProbe, which flushes in on_step_end
+    # AFTER HF increments global_step).
+    assert call_log["capture_steps"] == [5], (
+        f"expected [5], got {call_log['capture_steps']} "
+        "(per-module probe should capture once per optimizer step, aligned with "
+        "DgradProbe's step column)"
+    )
+    assert call_log["flush_steps"] == [5]

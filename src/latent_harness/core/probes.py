@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -9,6 +10,25 @@ import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
+
+
+# Default layer indices sampled by PerModuleGradProbe in addition to layer 0.
+# Layer 0 receives FULL coverage (all q/k/v/o × lora_A/B). These layers receive
+# spot coverage (same modules but only if present in the model).
+DEFAULT_SPOT_LAYERS: tuple[int, ...] = (1, 5, 10, 20, 35)
+
+# LoRA submodule kinds we log. Ordering matches the attn projection convention
+# q → k → v → o, with lora_A before lora_B for each.
+DEFAULT_SUBMODULES: tuple[str, ...] = (
+    "q_proj.lora_A",
+    "q_proj.lora_B",
+    "k_proj.lora_A",
+    "k_proj.lora_B",
+    "v_proj.lora_A",
+    "v_proj.lora_B",
+    "o_proj.lora_A",
+    "o_proj.lora_B",
+)
 
 
 class DgradProbe:
@@ -71,12 +91,16 @@ class DgradProbe:
 
 
 def maybe_init_probes(model, runtime_config) -> dict | None:
-    """If runtime_config.probe_mode is True, attach DgradProbe + optional RMSNormDenomProbe.
+    """If runtime_config.probe_mode is True, attach DgradProbe + optional probes.
 
     Returns:
         None if probe_mode is False.
-        Otherwise dict: {"dgrad": DgradProbe, "rmsnorm": RMSNormDenomProbe | None}.
-        Caller is responsible for calling flush(step) per optimizer step and detach_all() at end.
+        Otherwise dict:
+          - "dgrad":      DgradProbe (always when probe_mode=True)
+          - "rmsnorm":    RMSNormDenomProbe | None (if q_norm/k_norm present)
+          - "per_module": PerModuleGradProbe | None (if enable_per_module_grad_probe=True)
+        Caller is responsible for calling the appropriate flush/capture method per
+        step and detach_all() at end.
     """
     if not getattr(runtime_config, "probe_mode", False):
         return None
@@ -156,7 +180,158 @@ def maybe_init_probes(model, runtime_config) -> dict | None:
             }
         )
 
-    return {"dgrad": dgrad_probe, "rmsnorm": rmsnorm_probe}
+    per_module_probe = None
+    if getattr(runtime_config, "enable_per_module_grad_probe", False):
+        # Default coverage: layer 0 (full) + spot layers {1, 5, 10, 20, 35}.
+        # Filter spot layers to ones that actually exist in this model so we
+        # don't silently skip — the probe will log a warning if nothing matches
+        # (e.g. spec drift / wrong model family).
+        spot = [i for i in DEFAULT_SPOT_LAYERS if i < len(layers)]
+        layer_indices = sorted({0, *spot})
+        per_module_probe = PerModuleGradProbe(
+            output_path=out_dir / "per_module_grad.csv",
+            layer_indices=layer_indices,
+        )
+        per_module_probe.attach(model, layer_indices=layer_indices)
+        logger.info(
+            "PerModuleGradProbe attached: %d targets across layers %s",
+            len(per_module_probe._targets), layer_indices,
+        )
+
+    return {
+        "dgrad": dgrad_probe,
+        "rmsnorm": rmsnorm_probe,
+        "per_module": per_module_probe,
+    }
+
+
+class PerModuleGradProbe:
+    """Capture per-module parameter gradient norms for LoRA A/B weights.
+
+    Complements DgradProbe (which logs layer-output / hidden-state gradient).
+    DgradProbe sees the symptom of propagation (bounded ~1-4 even at crash step),
+    whereas PerModuleGradProbe sees the underlying LoRA adapter weight gradient
+    where the NaN actually originates (e.g. ``q_proj.lora_A.default.weight``
+    at layer 0 blowing up before the hidden-state gradient does).
+
+    Unlike the hook-based probes, this reads ``param.grad`` directly after
+    backward. Must be called between ``backward()`` and ``optimizer.zero_grad()``
+    — i.e. from the Trainer's ``on_pre_optimizer_step`` callback. Calling from
+    ``on_step_end`` will read zeros because HF zeros grads after the step.
+
+    Usage:
+        probe = PerModuleGradProbe(output_path=Path("per_module_grad.csv"))
+        probe.attach(model, layer_indices=[0, 1, 5, 10, 35])
+        ... (training step: forward + backward; optimizer NOT stepped yet) ...
+        probe.capture(step=global_step)
+        probe.detach_all()  # at end of run
+    """
+
+    # Match  base_model.model.model.layers.<N>.self_attn.<PROJ>_proj.lora_<A|B>.default.weight
+    # (PEFT standard layout). ``N`` is captured so we can filter by layer.
+    _PARAM_RE = re.compile(
+        r".*\.layers\.(?P<layer>\d+)\.self_attn\."
+        r"(?P<proj>[qkvo])_proj\.lora_(?P<ab>[AB])\.default\.weight$"
+    )
+
+    def __init__(
+        self,
+        output_path: Path | str,
+        layer_indices: Iterable[int] | None = None,
+        submodules: Iterable[str] = DEFAULT_SUBMODULES,
+    ):
+        self.output_path = Path(output_path)
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.output_path.exists():
+            self.output_path.unlink()
+        self._wrote_header = False
+        # Ordered list of (param_full_name, layer_idx, submodule) we log per step.
+        self._targets: list[tuple[str, int, str]] = []
+        # Mapping param_full_name -> torch.nn.Parameter for fast lookup at capture time.
+        self._params: dict[str, torch.nn.Parameter] = {}
+        # Allowed layers (None = accept any layer that matches the regex).
+        self._layer_set: set[int] | None = (
+            set(int(i) for i in layer_indices) if layer_indices is not None else None
+        )
+        self._submodules = tuple(submodules)
+
+    def attach(self, model: nn.Module, layer_indices: Iterable[int] | None = None) -> None:
+        """Discover target LoRA params by walking ``model.named_parameters()``.
+
+        If ``layer_indices`` is supplied here it overrides the constructor value.
+        """
+        if layer_indices is not None:
+            self._layer_set = set(int(i) for i in layer_indices)
+
+        # Compile a set of allowed submodule tokens like ``"q_proj.lora_A"``.
+        allowed_submodules = set(self._submodules)
+
+        discovered: list[tuple[str, int, str, torch.nn.Parameter]] = []
+        for full_name, param in model.named_parameters():
+            m = self._PARAM_RE.match(full_name)
+            if m is None:
+                continue
+            layer_idx = int(m.group("layer"))
+            if self._layer_set is not None and layer_idx not in self._layer_set:
+                continue
+            submodule = f"{m.group('proj')}_proj.lora_{m.group('ab')}"
+            if submodule not in allowed_submodules:
+                continue
+            discovered.append((full_name, layer_idx, submodule, param))
+
+        # Sort for stable CSV column order: layer first, then our canonical submodule order.
+        submodule_rank = {s: i for i, s in enumerate(self._submodules)}
+        discovered.sort(
+            key=lambda t: (t[1], submodule_rank.get(t[2], len(submodule_rank)), t[0])
+        )
+        for full_name, layer_idx, submodule, param in discovered:
+            self._targets.append((full_name, layer_idx, submodule))
+            self._params[full_name] = param
+
+        if not self._targets:
+            logger.warning(
+                "PerModuleGradProbe.attach: no LoRA A/B parameters matched the "
+                "expected pattern ``.layers.<N>.self_attn.<proj>_proj.lora_<A|B>."
+                "default.weight``. Dumping first 10 trainable parameter names as "
+                "discovery aid: %s",
+                [n for n, p in model.named_parameters() if p.requires_grad][:10],
+            )
+
+    def capture(self, step: int) -> None:
+        """Read ``.grad`` off every target parameter and append a row per target.
+
+        Must be called BEFORE the optimizer step (after backward, before
+        ``optimizer.zero_grad()``). If a target's grad is ``None`` the row is
+        still written with NaN so downstream heatmaps stay rectangular.
+        """
+        with self.output_path.open("a", newline="") as f:
+            writer = csv.writer(f)
+            if not self._wrote_header:
+                writer.writerow(
+                    ["step", "module_name", "layer_idx", "submodule",
+                     "max_abs_grad", "mean_abs_grad"]
+                )
+                self._wrote_header = True
+            for full_name, layer_idx, submodule in self._targets:
+                param = self._params.get(full_name)
+                if param is None or param.grad is None:
+                    writer.writerow([step, full_name, layer_idx, submodule,
+                                     float("nan"), float("nan")])
+                    continue
+                g = param.grad.detach()
+                # Cast to fp32 for stable reduction across bf16/fp16 grads.
+                g_abs = g.to(torch.float32).abs()
+                writer.writerow([
+                    step, full_name, layer_idx, submodule,
+                    float(g_abs.max().item()),
+                    float(g_abs.mean().item()),
+                ])
+
+    def detach_all(self) -> None:
+        # No hooks to unregister — ``.grad`` reads are passive — but clear
+        # state for symmetry with the other probes.
+        self._params.clear()
+        self._targets.clear()
 
 
 class RMSNormDenomProbe:

@@ -85,6 +85,13 @@ class LatentRuntimeConfig:
     probe_mode: bool = False
     #: Directory for probe CSV output. Required when probe_mode is True.
     probe_output_dir: str | None = None
+    #: When True (requires probe_mode=True), also attach PerModuleGradProbe.
+    #: Records max/mean |dL/dW| for LoRA A/B adapter weights at layer 0 (full
+    #: q/k/v/o × A/B coverage) and spot layers {1, 5, 10, 20, 35}. This is the
+    #: Phase 1.6 mechanism-story probe: DgradProbe captures the hidden-state
+    #: gradient (symptom), while PerModuleGradProbe captures the LoRA weight
+    #: gradient (source of the bf16 NaN pathology in q_proj.lora_A at layer 0).
+    enable_per_module_grad_probe: bool = False
 
     def __post_init__(self) -> None:
         if self.detach_keep_last_k is not None:
@@ -112,4 +119,10 @@ class LatentRuntimeConfig:
             raise ValueError(
                 "probe_mode=True requires probe_output_dir to be set "
                 "(give a writable directory path)."
+            )
+        if self.enable_per_module_grad_probe and not self.probe_mode:
+            raise ValueError(
+                "enable_per_module_grad_probe=True requires probe_mode=True "
+                "(the per-module probe reuses probe_output_dir and shares the "
+                "ProbeCallback lifecycle)."
             )

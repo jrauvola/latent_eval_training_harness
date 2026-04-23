@@ -380,7 +380,17 @@ class LatentTrainer(TrainingTelemetryMixin, Trainer):
 
 
 class ProbeCallback(TrainerCallback):
-    """Attach dgrad / rmsnorm probes at train start, flush per step, detach at end."""
+    """Attach dgrad / rmsnorm / per-module grad probes; flush per step; detach at end.
+
+    Hook choice rationale:
+      - DgradProbe + RMSNormDenomProbe use backward/forward hooks that populate
+        state during the step; their ``flush`` is safe in ``on_step_end``.
+      - PerModuleGradProbe reads ``param.grad`` directly. HF Trainer zeroes
+        grads immediately after ``optimizer.step()`` and BEFORE ``on_step_end``.
+        So we must capture in ``on_pre_optimizer_step`` (runs after all
+        gradient-accumulation substeps finish backward, before clip + step +
+        zero_grad). Reading grad in ``on_step_end`` would log zeros.
+    """
 
     def __init__(self, runtime_config):
         self.runtime_config = runtime_config
@@ -388,6 +398,18 @@ class ProbeCallback(TrainerCallback):
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         self.probes = maybe_init_probes(model, self.runtime_config)
+
+    def on_pre_optimizer_step(self, args, state, control, **kwargs):
+        """Capture param-grad probes BEFORE optimizer step zeros the grads."""
+        if self.probes is None:
+            return
+        # state.global_step has not yet been incremented for this step at
+        # on_pre_optimizer_step time; use it + 1 so the per-module probe's
+        # step column aligns with DgradProbe (which flushes from on_step_end
+        # where global_step has already been incremented).
+        step = state.global_step + 1
+        if self.probes.get("per_module") is not None:
+            self.probes["per_module"].capture(step=step)
 
     def on_step_end(self, args, state, control, **kwargs):
         if self.probes is None:
@@ -405,6 +427,8 @@ class ProbeCallback(TrainerCallback):
             self.probes["dgrad"].detach_all()
         if self.probes.get("rmsnorm") is not None:
             self.probes["rmsnorm"].detach_all()
+        if self.probes.get("per_module") is not None:
+            self.probes["per_module"].detach_all()
 
 
 class StandardSFTModel(nn.Module):
