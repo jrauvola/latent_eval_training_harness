@@ -1,0 +1,71 @@
+# F6 — Gaussian-noise perturbation of latent-KV on V2 bf16.
+#
+# Re-eval V2 bf16 on the first 200 GSM8k examples with no perturbation
+# (sigma=0.0 = baseline control). This establishes the reference accuracy
+# against which noisy sigmas are compared.
+#
+# See /Users/jrauvola/.claude/projects/.../memory/MEMORY.md and the F6 task
+# brief. Output dir is partitioned by sigma so parallel runs won't clobber.
+
+runtime:
+  output_dir: artifacts/eval/qwen3_4b_codi_v2_f6_perturb/sigma_0.1
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 4
+  progress_log_interval_batches: 5
+  max_examples_per_benchmark: 200
+  max_new_tokens: 256
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+  num_latent_sweep: null
+  skip_latent_injection_at_zero: true
+  dump_latent_traces: false
+  dump_kv_cache: false
+  persistence_every_examples: 32
+  seed: 11
+
+  perturb_latent_noise_sigma: 0.1
+  perturb_latent_noise_seed: 11
+
+benchmarks:
+  - gsm8k
+
+models:
+  - name: qwen3_4b_codi_bf16_kv_latent_detach_last_2
+    checkpoint_source: jrauvola/qwen3-4b-codi-bf16-kv-latent-detach-last-2
+    checkpoint_type: hf_repo
+    model_kind: latent_runtime
+    inference_strategy: latent_cot
+    model:
+      base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+      lora_r: 16
+      lora_alpha: 16
+      lora_dropout: 0.1
+      use_lora: true
+      full_precision: true
+      freeze_base_embeddings: true
+    runtime:
+      model_max_length: 1024
+      num_latent: 4
+      detach_latent_between_steps: true
+      detach_cache_between_steps: true
+      detach_keep_last_k: 2
+      detach_position_mode: all
+      use_prj: true
+      prj_dim: 2048
+      prj_dropout: 0.0
+      prj_no_ln: false
+      prj_fp32: true
+      prj_residual_gated: true
+      prj_gate_init: 0.0
+      remove_eos: true
+      bf16: true
+      fp32: false
+      seed: 11
+      use_chat_template: true
+      chat_template_kwargs:
+        enable_thinking: false

@@ -55,6 +55,17 @@ class EvaluationRuntimeConfig:
     #: step by step." appended to the raw question. Default "" preserves legacy
     #: behavior. See spec §7a.B / §7b Phase 1a.
     prompt_suffix: str = ""
+    #: F6 — Gaussian-noise perturbation of latent-position KV cache entries.
+    #: After the latent rollout loop (and before the answer loop), each
+    #: latent-position K/V slice is perturbed as
+    #: ``x += sigma * std(x) * randn_like(x)`` (per-tensor std, per-layer).
+    #: ``0.0`` (default) disables perturbation entirely (no RNG draw, no mutation).
+    #: Typical sweep values: {0.1, 0.5, 1.0, 2.0}.
+    perturb_latent_noise_sigma: float = 0.0
+    #: RNG seed used for the latent-KV perturbation. Separate from the global
+    #: eval ``seed`` so changing the noise seed doesn't invalidate generation
+    #: determinism elsewhere. Same seed + same sigma reproduces the noise draw.
+    perturb_latent_noise_seed: int = 11
 
 
 InferenceStrategy = Literal["latent_cot", "standard_generation"]

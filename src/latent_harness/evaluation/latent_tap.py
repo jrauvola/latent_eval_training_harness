@@ -119,6 +119,83 @@ def project_hidden_to_topk(
     return batch_rows
 
 
+def perturb_latent_kv_inplace(
+    cache: Any,
+    *,
+    encoder_prefix_length: int,
+    num_latent: int,
+    noise_sigma: float,
+    seed: int,
+) -> None:
+    """F6: in-place Gaussian perturbation of K/V at latent positions.
+
+    For each layer's K and V tensors (shape ``[batch, num_heads, seq_len, head_dim]``),
+    slice the latent positions ``[encoder_prefix_length, encoder_prefix_length + num_latent)``
+    and add ``noise_sigma * std(slice) * randn_like(slice)`` in-place. ``std`` is
+    computed per tensor over all elements of the slice (a single scalar per K- or
+    V-slice per layer) so the perturbation scale tracks each tensor's own scale.
+
+    No-op when ``num_latent <= 0`` or ``noise_sigma == 0.0`` — the ``sigma=0`` call
+    must introduce **zero** drift versus the un-perturbed control.
+
+    Handles both ``DynamicCache`` and legacy tuple-of-tuples caches. Uses a
+    dedicated torch ``Generator`` seeded with ``seed`` so noise is reproducible
+    and independent of any other RNG stream.
+    """
+    if noise_sigma == 0.0 or num_latent <= 0:
+        return
+
+    try:
+        from transformers.cache_utils import DynamicCache
+    except ImportError:  # pragma: no cover
+        DynamicCache = None
+
+    # Normalize to a list of (k, v) layer tensors we can mutate in place.
+    layer_kvs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    if DynamicCache is not None and isinstance(cache, DynamicCache):
+        for layer_idx in range(len(cache)):
+            layer_data = cache[layer_idx]
+            layer_kvs.append((layer_data[0], layer_data[1]))
+    elif isinstance(cache, (tuple, list)):
+        for layer_kv in cache:
+            if isinstance(layer_kv, (tuple, list)) and len(layer_kv) >= 2:
+                layer_kvs.append((layer_kv[0], layer_kv[1]))
+    else:
+        raise TypeError(f"Unsupported cache type for KV perturbation: {type(cache).__name__}")
+
+    if not layer_kvs:
+        return
+
+    k_probe = layer_kvs[0][0]
+    device = k_probe.device
+    seq_len = k_probe.size(-2)
+    # Latent positions: from encoder_prefix_length to encoder_prefix_length + num_latent.
+    # Guard defensively (should always match because the latent rollout appended
+    # exactly num_latent tokens after the encoder prefix).
+    latent_start = encoder_prefix_length
+    latent_stop = min(encoder_prefix_length + num_latent, seq_len)
+    if latent_stop <= latent_start:
+        return
+
+    generator = torch.Generator(device=device)
+    generator.manual_seed(int(seed))
+
+    for k, v in layer_kvs:
+        for tensor in (k, v):
+            slice_ = tensor[:, :, latent_start:latent_stop, :]
+            # Per-tensor scalar std over the latent slice. Cast to float32 to avoid
+            # catastrophic precision loss in bf16 when computing std of small values.
+            std_val = slice_.detach().float().std().item()
+            if std_val == 0.0:
+                continue
+            # Sample noise in float32 for precision, then cast to the slice's dtype.
+            noise = torch.empty(slice_.shape, dtype=torch.float32, device=device).normal_(
+                mean=0.0, std=1.0, generator=generator
+            )
+            additive = (noise_sigma * std_val) * noise.to(dtype=slice_.dtype)
+            slice_.add_(additive)
+
+
 def generate_from_latent_with_taps(
     runtime: Any,
     *,
@@ -133,6 +210,8 @@ def generate_from_latent_with_taps(
     top_p: float,
     skip_latent_injection: bool = False,
     capture_latent_hidden: bool = True,
+    perturb_latent_noise_sigma: float = 0.0,
+    perturb_latent_noise_seed: int = 11,
 ) -> GenerationWithTaps:
     """Run latent generation and capture per-step hidden states + final cache.
 
@@ -143,6 +222,10 @@ def generate_from_latent_with_taps(
     When ``skip_latent_injection`` is True or ``inf_latent_iterations == 0``,
     the latent rollout is skipped entirely and generation proceeds directly
     from the encoder output — this is the "zero-latent ablation" path.
+
+    When ``perturb_latent_noise_sigma > 0`` and latent iterations > 0, Gaussian
+    noise is added to the K/V tensors at the latent positions after the latent
+    rollout loop and before the answer generation loop (F6 ablation).
     """
 
     device = input_ids.device
@@ -171,6 +254,19 @@ def generate_from_latent_with_taps(
                 )
             )
         latent = runtime.maybe_project(final_hidden)
+
+    # F6: apply Gaussian-noise perturbation on the latent-position K/V entries
+    # BEFORE the answer loop. This preserves the latent rollout (so latent
+    # hidden states are unchanged for trace dumping) but perturbs the cached
+    # representations the answer loop will attend over.
+    if perturb_latent_noise_sigma > 0.0 and effective_iterations > 0:
+        perturb_latent_kv_inplace(
+            past_key_values,
+            encoder_prefix_length=encoder_prefix_length,
+            num_latent=effective_iterations,
+            noise_sigma=perturb_latent_noise_sigma,
+            seed=perturb_latent_noise_seed,
+        )
 
     # From this point forward: reproduce the stock generation loop.
     next_embeds = runtime.build_eot_embeds(

@@ -191,6 +191,8 @@ def _generate_predictions_with_taps(
                 top_p=config.top_p,
                 skip_latent_injection=skip_latent_injection,
                 capture_latent_hidden=capture_hidden,
+                perturb_latent_noise_sigma=getattr(config, "perturb_latent_noise_sigma", 0.0),
+                perturb_latent_noise_seed=getattr(config, "perturb_latent_noise_seed", 11),
             )
         return taps.predictions, taps
 
@@ -372,11 +374,13 @@ def _run_single_evaluation(
     if kv_root is not None:
         ensure_dir(kv_root)
 
+    perturb_sigma = getattr(runtime, "perturb_latent_noise_sigma", 0.0)
     _log_event(
         f"starting (variant={variant}, benchmark={benchmark_name}, num_latent={num_latent}) "
         f"examples={len(examples)} batches={total_batches} "
         f"persistence_every={persistence_every} "
-        f"skip_latent_injection={skip_latent_injection}"
+        f"skip_latent_injection={skip_latent_injection} "
+        f"perturb_latent_noise_sigma={perturb_sigma}"
     )
 
     for batch_index, start in enumerate(range(0, len(examples), runtime.batch_size), start=1):
