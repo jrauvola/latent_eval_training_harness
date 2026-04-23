@@ -217,6 +217,240 @@ def generate_from_latent_with_taps(
     )
 
 
+def extract_latent_kv_all_layers(
+    cache: Any,
+    *,
+    encoder_prefix_length: int,
+    num_latent: int,
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Return a list of per-layer ``(k_slice, v_slice)`` tensors at the latent positions.
+
+    Unlike :func:`extract_kv_at_latent_positions`, this returns raw torch tensors
+    in their original shape ``[batch, num_heads, num_latent, head_dim]`` for every
+    layer — suitable for later re-injection into a fresh cache via
+    :func:`inject_latent_kv_into_cache`.
+    """
+    try:
+        from transformers.cache_utils import DynamicCache
+    except ImportError:
+        DynamicCache = None
+
+    layer_kvs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    if DynamicCache is not None and isinstance(cache, DynamicCache):
+        for layer in cache.layers:
+            layer_kvs.append((layer.keys, layer.values))
+    elif isinstance(cache, (tuple, list)):
+        for layer_kv in cache:
+            if isinstance(layer_kv, (tuple, list)) and len(layer_kv) >= 2:
+                layer_kvs.append((layer_kv[0], layer_kv[1]))
+    else:
+        raise TypeError(f"Unsupported cache type: {type(cache).__name__}")
+
+    if num_latent == 0:
+        return [(k[..., :0, :].clone(), v[..., :0, :].clone()) for k, v in layer_kvs]
+
+    out: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for k, v in layer_kvs:
+        seq_len = k.size(-2)
+        latent_start = seq_len - num_latent
+        if latent_start < encoder_prefix_length:
+            latent_start = max(encoder_prefix_length, latent_start)
+        out.append(
+            (
+                k[..., latent_start : latent_start + num_latent, :].detach().clone(),
+                v[..., latent_start : latent_start + num_latent, :].detach().clone(),
+            )
+        )
+    return out
+
+
+def inject_latent_kv_into_cache(
+    cache: Any,
+    *,
+    encoder_prefix_length: int,
+    num_latent: int,
+    injected_kv_per_layer: list[tuple[torch.Tensor, torch.Tensor]],
+) -> Any:
+    """Overwrite the latent-position KV slice of ``cache`` with ``injected_kv_per_layer``.
+
+    Mutates the cache in place (for ``DynamicCache``) by assigning into
+    ``layer.keys`` / ``layer.values`` tensors. ``injected_kv_per_layer`` must
+    have the same number of layers as ``cache`` and each tuple's tensors must
+    be broadcastable to the layer's ``[batch, num_heads, num_latent, head_dim]``
+    shape (dtype/device will be coerced).
+    """
+    try:
+        from transformers.cache_utils import DynamicCache
+    except ImportError:
+        DynamicCache = None
+
+    if num_latent == 0:
+        return cache
+
+    if DynamicCache is not None and isinstance(cache, DynamicCache):
+        layers = cache.layers
+    elif isinstance(cache, (tuple, list)):
+        # Build a new tuple-of-tuples cache (legacy path; immutable).
+        new_layers = []
+        for (k, v), (inj_k, inj_v) in zip(cache, injected_kv_per_layer):
+            seq_len = k.size(-2)
+            latent_start = seq_len - num_latent
+            new_k = k.clone()
+            new_v = v.clone()
+            new_k[..., latent_start : latent_start + num_latent, :] = inj_k.to(
+                device=k.device, dtype=k.dtype
+            )
+            new_v[..., latent_start : latent_start + num_latent, :] = inj_v.to(
+                device=v.device, dtype=v.dtype
+            )
+            new_layers.append((new_k, new_v))
+        return tuple(new_layers)
+    else:
+        raise TypeError(f"Unsupported cache type: {type(cache).__name__}")
+
+    for layer_idx, layer in enumerate(layers):
+        k = layer.keys
+        v = layer.values
+        if k is None or v is None:
+            continue
+        seq_len = k.size(-2)
+        latent_start = seq_len - num_latent
+        inj_k, inj_v = injected_kv_per_layer[layer_idx]
+        k[..., latent_start : latent_start + num_latent, :] = inj_k.to(
+            device=k.device, dtype=k.dtype
+        )
+        v[..., latent_start : latent_start + num_latent, :] = inj_v.to(
+            device=v.device, dtype=v.dtype
+        )
+    return cache
+
+
+def generate_with_injected_latent_kv(
+    runtime: Any,
+    *,
+    tokenizer,
+    input_ids: torch.LongTensor,
+    attention_mask: torch.LongTensor,
+    inf_latent_iterations: int,
+    max_new_tokens: int,
+    greedy: bool,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    injected_kv_per_layer: list[tuple[torch.Tensor, torch.Tensor]],
+    noise_only: bool = False,
+    noise_scale: float = 1.0,
+) -> GenerationWithTaps:
+    """Run a latent rollout, then OVERWRITE the latent-position KV slice before answer gen.
+
+    Workflow:
+      1. Encode question (B).
+      2. Run ``inf_latent_iterations`` latent steps to populate the cache.
+      3. Overwrite the latent-position KV slice in the resulting cache with
+         ``injected_kv_per_layer`` (the pre-captured KV from example A).
+      4. Generate answer tokens from the modified cache.
+
+    If ``noise_only`` is True, the injected KV is ignored and random Gaussian
+    noise of matching shape and magnitude is written into the latent positions
+    instead — a weaker ablation that answers "does the KV content matter at all?"
+    """
+    device = input_ids.device
+    batch_size = input_ids.size(0)
+
+    past_key_values, latent = runtime.encode_question(input_ids=input_ids, attention_mask=attention_mask)
+    encoder_prefix_length = input_ids.size(1)
+
+    # Latent rollout — same as the stock path, but we don't capture hidden states.
+    for _step_index in range(inf_latent_iterations):
+        outputs = runtime.model(
+            inputs_embeds=latent,
+            token_type_ids=runtime.build_token_type_ids(inputs_embeds=latent),
+            use_cache=True,
+            output_hidden_states=True,
+            past_key_values=past_key_values,
+        )
+        past_key_values = outputs.past_key_values
+        final_hidden = outputs.hidden_states[-1][:, -1:, :]
+        latent = runtime.maybe_project(final_hidden)
+
+    # KEY STEP: overwrite the latent-position KV entries.
+    if noise_only:
+        # Build noise-injection tuples from the current cache's latent slice shapes.
+        try:
+            from transformers.cache_utils import DynamicCache
+        except ImportError:
+            DynamicCache = None
+        if DynamicCache is not None and isinstance(past_key_values, DynamicCache):
+            for layer in past_key_values.layers:
+                k = layer.keys
+                v = layer.values
+                if k is None or v is None:
+                    continue
+                seq_len = k.size(-2)
+                latent_start = seq_len - inf_latent_iterations
+                k_slice = k[..., latent_start : latent_start + inf_latent_iterations, :]
+                v_slice = v[..., latent_start : latent_start + inf_latent_iterations, :]
+                k_std = k_slice.float().std().clamp_min(1e-6)
+                v_std = v_slice.float().std().clamp_min(1e-6)
+                k[..., latent_start : latent_start + inf_latent_iterations, :] = (
+                    torch.randn_like(k_slice.float()) * (k_std * noise_scale)
+                ).to(k.dtype)
+                v[..., latent_start : latent_start + inf_latent_iterations, :] = (
+                    torch.randn_like(v_slice.float()) * (v_std * noise_scale)
+                ).to(v.dtype)
+    else:
+        past_key_values = inject_latent_kv_into_cache(
+            past_key_values,
+            encoder_prefix_length=encoder_prefix_length,
+            num_latent=inf_latent_iterations,
+            injected_kv_per_layer=injected_kv_per_layer,
+        )
+
+    # Reproduce the stock generation loop.
+    next_embeds = runtime.build_eot_embeds(
+        batch_size=batch_size,
+        device=device,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+    predictions_tokens: list[list[int]] = [[] for _ in range(batch_size)]
+    finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+    for _ in range(max_new_tokens):
+        outputs = runtime.model(
+            inputs_embeds=next_embeds,
+            token_type_ids=runtime.build_token_type_ids(inputs_embeds=next_embeds),
+            use_cache=True,
+            past_key_values=past_key_values,
+        )
+        past_key_values = outputs.past_key_values
+        logits = outputs.logits[:, -1, : runtime.eot_id]
+        token_ids = runtime._sample_tokens(  # noqa: SLF001
+            logits=logits,
+            greedy=greedy,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+        )
+        for batch_index, token_id in enumerate(token_ids.tolist()):
+            if finished[batch_index]:
+                continue
+            predictions_tokens[batch_index].append(token_id)
+            if token_id == tokenizer.eos_token_id:
+                finished[batch_index] = True
+        if bool(finished.all()):
+            break
+        next_embeds = runtime.get_input_embedding_layer()(token_ids).unsqueeze(1)
+
+    predictions = [tokenizer.decode(tokens, skip_special_tokens=True) for tokens in predictions_tokens]
+    return GenerationWithTaps(
+        predictions=predictions,
+        latent_traces=[],
+        final_cache=past_key_values,
+        encoder_prefix_length=encoder_prefix_length,
+        num_latent_iterated=inf_latent_iterations,
+    )
+
+
 def extract_kv_at_latent_positions(
     cache: Any,
     *,

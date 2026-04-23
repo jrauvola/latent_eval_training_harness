@@ -1,0 +1,73 @@
+# F5 — Cross-example latent-KV swap on V2 bf16.
+#
+# For 100 GSM8k examples, run V2 bf16 through the full latent rollout (num_latent=8)
+# and capture each example's latent-position KV. Pair examples via a random
+# permutation (B's partner = A where A_idx = shuffle[B_idx]), then re-run B's
+# answer generation after splicing A's latent-KV into B's cache at the latent
+# positions. Compare own-KV vs swapped-KV accuracy.
+#
+# Run via: scripts/f5_kv_swap_experiment.py
+# The script reuses this config file for model/benchmark/runtime settings; the
+# eval CLI is NOT used directly (F5 requires a custom two-pass generation path).
+
+runtime:
+  output_dir: research_findings/f5_kv_swap
+  cache_dir: .cache/huggingface
+  snapshot_dir: artifacts/datasets
+  device: auto
+  batch_size: 4
+  progress_log_interval_batches: 5
+  max_examples_per_benchmark: 100
+  max_new_tokens: 256
+  greedy: true
+  temperature: 0.1
+  top_k: 40
+  top_p: 0.95
+
+  # F5 uses num_latent=8 (same as V2 headline sweep value for GSM8k).
+  num_latent_sweep: [8]
+  skip_latent_injection_at_zero: true
+  dump_latent_traces: false
+  dump_kv_cache: false
+  persistence_every_examples: 16
+  seed: 11
+
+benchmarks:
+  - gsm8k
+
+models:
+  # Q-V2 — bf16 headline: step-boundary KV+latent detach, keep_last_2.
+  - name: qwen3_4b_codi_bf16_kv_latent_detach_last_2
+    checkpoint_source: jrauvola/qwen3-4b-codi-bf16-kv-latent-detach-last-2
+    checkpoint_type: hf_repo
+    model_kind: latent_runtime
+    inference_strategy: latent_cot
+    model:
+      base_model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+      lora_r: 16
+      lora_alpha: 16
+      lora_dropout: 0.1
+      use_lora: true
+      full_precision: true
+      freeze_base_embeddings: true
+    runtime:
+      model_max_length: 768
+      num_latent: 8
+      detach_latent_between_steps: true
+      detach_cache_between_steps: true
+      detach_keep_last_k: 2
+      detach_position_mode: all
+      use_prj: true
+      prj_dim: 2048
+      prj_dropout: 0.0
+      prj_no_ln: false
+      prj_fp32: true
+      prj_residual_gated: true
+      prj_gate_init: 0.0
+      remove_eos: true
+      bf16: true
+      fp32: false
+      seed: 11
+      use_chat_template: true
+      chat_template_kwargs:
+        enable_thinking: false
