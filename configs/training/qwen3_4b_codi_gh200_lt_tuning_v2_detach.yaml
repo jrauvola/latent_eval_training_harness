@@ -33,7 +33,7 @@ model:
 
 data:
   dataset_names:
-    - gsm8k_aug
+    - gsm8k_aug_nl
   registry_ids:
     - numinamath_15
   registry_path: configs/datasets/full_registry.yaml

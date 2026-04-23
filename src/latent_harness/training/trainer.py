@@ -484,6 +484,71 @@ def _configure_training_logging() -> None:
     logger.setLevel(logging.INFO)
 
 
+
+def _resize_embeddings_peft_safe(peft_or_base_model, new_num_tokens: int) -> None:
+    """Resize token embeddings on a model that may be wrapped by PEFT.
+
+    When ``modules_to_save`` includes ``embed_tokens`` / ``lm_head``, the PEFT
+    LoRA setup wraps those modules in ``ModulesToSaveWrapper``. HF's
+    ``resize_token_embeddings`` refuses anything that isn't a raw
+    ``nn.Embedding`` / ``nn.Linear``. We temporarily unwrap, resize on the base
+    HF model, then re-wrap so the PEFT adapter tracking is preserved.
+    """
+    # Local import so plain CODI / non-PEFT paths don't pay the import cost.
+    from peft.utils.other import ModulesToSaveWrapper
+
+    base = peft_or_base_model
+    if hasattr(base, "get_base_model"):
+        try:
+            base = base.get_base_model()
+        except Exception:
+            base = peft_or_base_model
+
+    in_embed = base.get_input_embeddings()
+    out_embed = base.get_output_embeddings()
+
+    in_adapters: list[str] = []
+    out_adapters: list[str] = []
+    in_active: str | None = None
+    out_active: str | None = None
+
+    if isinstance(in_embed, ModulesToSaveWrapper):
+        in_adapters = list(in_embed.modules_to_save.keys())
+        active = in_embed.active_adapter
+        in_active = active[0] if isinstance(active, list) else active
+        base.set_input_embeddings(in_embed.original_module)
+
+    if isinstance(out_embed, ModulesToSaveWrapper):
+        out_adapters = list(out_embed.modules_to_save.keys())
+        active = out_embed.active_adapter
+        out_active = active[0] if isinstance(active, list) else active
+        base.set_output_embeddings(out_embed.original_module)
+
+    base.resize_token_embeddings(new_num_tokens)
+
+    if in_adapters:
+        new_in = base.get_input_embeddings()
+        anchor = in_active or in_adapters[0]
+        wrapper = ModulesToSaveWrapper(new_in, anchor)
+        for name in in_adapters:
+            if name != anchor:
+                wrapper.update(name)
+        if in_active is not None:
+            wrapper._active_adapter = [in_active]
+        base.set_input_embeddings(wrapper)
+
+    if out_adapters:
+        new_out = base.get_output_embeddings()
+        anchor = out_active or out_adapters[0]
+        wrapper = ModulesToSaveWrapper(new_out, anchor)
+        for name in out_adapters:
+            if name != anchor:
+                wrapper.update(name)
+        if out_active is not None:
+            wrapper._active_adapter = [out_active]
+        base.set_output_embeddings(wrapper)
+
+
 def run_lt_tuning_training(
     *,
     config: TrainingConfig,
@@ -557,14 +622,11 @@ def run_lt_tuning_training(
             thinking_token_id,
             added,
         )
-        # Resize the underlying transformer's embeddings. The LoRA-wrapped
-        # model still exposes ``resize_token_embeddings`` via the peft model's
-        # base model delegate.
-        base_for_resize = getattr(runtime_model.model, "resize_token_embeddings", None)
-        if base_for_resize is None:
-            base = runtime_model.model.get_base_model() if hasattr(runtime_model.model, "get_base_model") else runtime_model.model
-            base_for_resize = base.resize_token_embeddings
-        base_for_resize(len(tokenizer))
+        # Resize the underlying transformer's embeddings. When PEFT wraps
+        # ``embed_tokens`` / ``lm_head`` via ``modules_to_save`` the HF
+        # ``_get_resized_embeddings`` type-check fails, so we unwrap,
+        # resize, and re-wrap via the helper below.
+        _resize_embeddings_peft_safe(runtime_model.model, len(tokenizer))
         logger.info("Resized model embeddings to vocab size %d", len(tokenizer))
     runtime_model.set_thinking_token_id(thinking_token_id)
 
