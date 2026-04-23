@@ -622,12 +622,40 @@ def run_lt_tuning_training(
             thinking_token_id,
             added,
         )
-        # Resize the underlying transformer's embeddings. When PEFT wraps
-        # ``embed_tokens`` / ``lm_head`` via ``modules_to_save`` the HF
-        # ``_get_resized_embeddings`` type-check fails, so we unwrap,
-        # resize, and re-wrap via the helper below.
-        _resize_embeddings_peft_safe(runtime_model.model, len(tokenizer))
-        logger.info("Resized model embeddings to vocab size %d", len(tokenizer))
+        # Resize the underlying transformer's embeddings. Two subtleties:
+        #   1. PEFT wraps ``embed_tokens`` / ``lm_head`` in
+        #      ``ModulesToSaveWrapper`` when ``modules_to_save`` is set,
+        #      and HF's ``_get_resized_embeddings`` refuses non-Embedding
+        #      types. ``_resize_embeddings_peft_safe`` unwraps/resizes/re-
+        #      wraps around that.
+        #   2. ``runtime.py`` already resized to ``original_vocab + 3`` for
+        #      the model-only PAD/BOT/EOT tokens. Those tokens are NOT
+        #      added to the HF tokenizer, so ``len(tokenizer)`` can be
+        #      smaller than the current embedding size (happens whenever
+        #      the thinking-token id lands inside the base vocab, e.g.
+        #      Qwen3's 151669 vs the 151939-wide table). Shrinking would
+        #      drop PAD/BOT/EOT and cause downstream device-side asserts.
+        #      Clamp the target so we never shrink.
+        from peft.utils.other import ModulesToSaveWrapper as _MTSW
+        _in_embed = runtime_model.model.get_input_embeddings()
+        _cur = (
+            _in_embed.original_module.num_embeddings
+            if isinstance(_in_embed, _MTSW)
+            else _in_embed.num_embeddings
+        )
+        _target = max(len(tokenizer), _cur)
+        if _target > _cur:
+            _resize_embeddings_peft_safe(runtime_model.model, _target)
+            logger.info(
+                "Resized model embeddings from %d to %d (tokenizer_len=%d)",
+                _cur, _target, len(tokenizer),
+            )
+        else:
+            logger.info(
+                "Skipped embedding resize: current=%d >= tokenizer_len=%d;"
+                " thinking-token id %d fits existing embedding table",
+                _cur, len(tokenizer), thinking_token_id,
+            )
     runtime_model.set_thinking_token_id(thinking_token_id)
 
     output_root = Path(training_args.output_dir)
